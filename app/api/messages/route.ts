@@ -28,6 +28,4 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export const config = {
-  maxDuration: 60 // Vercel: max 60s
-};
+export const maxDuration = 60;
