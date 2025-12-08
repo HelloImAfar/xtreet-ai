@@ -4,10 +4,9 @@ import { createClient } from "@supabase/supabase-js";
 export async function GET() {
   try {
     const supabase = createClient(
-    process.env.SUPABASE_URL!,
-    process.env.SUPABASE_KEY!,
-    { db: { schema: "api" } }
-  );
+      process.env.SUPABASE_URL!,
+      process.env.SUPABASE_KEY!
+    );
 
 
     const { data, error } = await supabase
