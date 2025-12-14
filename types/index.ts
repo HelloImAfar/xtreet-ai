@@ -30,3 +30,5 @@ export interface CallModelPayload {
   stream?: boolean;
   model?: string;
 }
+
+export * from './rex';
