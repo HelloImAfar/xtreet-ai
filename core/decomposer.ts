@@ -1,87 +1,78 @@
 import type { DecomposedTask } from '@/types/rex';
 
-function splitSentences(text: string) {
-  // split by newlines first (lists), then by sentence endings
-  const byLines = text.split(/\n+/).map((l) => l.trim()).filter(Boolean);
-  const sentences: string[] = [];
-  for (const line of byLines) {
-    // if line looks like a list item (starts with - or number.), strip bullets
-    const bullet = line.replace(/^\s*[-*\u2022]\s*/, '').replace(/^\s*\d+[.)]\s*/, '').trim();
-    // split by sentence terminators but keep short fragments
-    const parts = bullet.split(/(?<=[.!?;])\s+|;\s+/).map((p) => p.trim()).filter(Boolean);
-    if (parts.length > 1) sentences.push(...parts);
-    else sentences.push(bullet);
-  }
-  return sentences;
-}
-
-function splitByConjunctions(sentence: string) {
-  // split on ' and ', ' & ', ', and ' but avoid splitting inside parentheses
-  const parts = sentence
-    .split(/,\s+and\s+|\s+and\s+|\s+&\s+/i)
-    .map((p) => p.trim())
-    .filter(Boolean);
-  return parts;
-}
-
-function hasSequencingKeywords(text: string) {
-  return /\b(first|then|next|after that|afterwards|finally|subsequently)\b/i.test(text);
-}
-
-function hasParallelKeywords(text: string) {
-  return /\b(in parallel|simultaneously|at the same time|concurrently)\b/i.test(text);
-}
-
 /**
- * Decompose a request text into atomic tasks with dependencies and meta information.
- * This is pure, synchronous and deterministic logic.
+ * Decompose a user text into an array of atomic tasks.
+ * Heuristics:
+ * - If input contains explicit list markers (numbers, bullets) split by lines
+ * - Else split by sentences and conjunctions
+ * - Detect sequence markers (first/then/next) and create ordered dependencies
+ * - For plain "A and B" style coordination, create parallelizable tasks (no deps)
+ * Returns tasks with ids, preserved order and dependency hints.
  */
-export function decomposeRequest(text: string): DecomposedTask[] {
-  if (!text || !text.trim()) return [];
+export function decompose(text: string): DecomposedTask[] {
+  const t = (text || '').trim();
+  if (!t) return [{ id: 't0', text: '' }];
 
-  const sentences = splitSentences(text);
-  const tasks: DecomposedTask[] = [];
+  // 1) Detect explicit lists (lines that look like list items)
+  const lines = t.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  const listItemPattern = /^([\-\*•]|\d+[\)\.]|[a-zA-Z]\))/;
+  const isList = lines.length > 1 && lines.every((l) => listItemPattern.test(l) || l.length < 120);
+  if (isList) {
+    const tasks: DecomposedTask[] = [];
+    lines.forEach((line, i) => {
+      // strip leading bullets/numbers
+      const cleaned = line.replace(/^([\-\*•]|\d+[\)\.]|[a-zA-Z]\))\s*/, '');
+      tasks.push({ id: `t${i}`, text: cleaned, priority: lines.length - i });
+    });
+    return tasks;
+  }
 
-  // First pass: split by conjunctions inside sentences
+  // 2) Sentence + conjunction based splitting
+  // First split on sentences
+  const sentences = t.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
+  // If single sentence but contains commas/ands, split into clauses
+  const clauses: string[] = [];
   for (const s of sentences) {
-    const parts = splitByConjunctions(s);
-    if (parts.length > 1) {
-      // if sentence contained sequencing keywords, keep ordering; otherwise mark as parallelizable
-      const parallel = !hasSequencingKeywords(s) || hasParallelKeywords(s);
-      for (const p of parts) {
-        tasks.push({ id: '', text: p, meta: { parallelizable: parallel } });
+    // split by semicolons first
+    const parts = s.split(/;|:\s+/).map((p) => p.trim()).filter(Boolean);
+    for (const p of parts) {
+      // split by ' and ' only when it separates clauses (heuristic)
+      if (/\band\b/i.test(p) && p.length < 300) {
+        const andParts = p.split(/\band\b/i).map((x) => x.trim()).filter(Boolean);
+        if (andParts.length > 1) {
+          andParts.forEach((ap) => clauses.push(ap));
+          continue;
+        }
       }
-    } else {
-      tasks.push({ id: '', text: s, meta: { parallelizable: hasParallelKeywords(s) } });
+      clauses.push(p);
     }
   }
 
-  // Assign ids and detect simple dependencies based on sequencing keywords
-  for (let i = 0; i < tasks.length; i++) {
-    tasks[i].id = `t${i}`;
-  }
+  // If after splitting we still have one clause, return as single task
+  if (clauses.length <= 1) return [{ id: 't0', text: t }];
 
-  // Second pass: determine dependencies
-  // If a task or its originating sentence contained sequencing keywords, link it to previous non-empty task
-  for (let i = 0; i < tasks.length; i++) {
-    const t = tasks[i];
-    // if task text contains explicit "after" referencing another step, naive link to previous
-    if (hasSequencingKeywords(t.text)) {
-      if (i > 0) t.dependencies = [tasks[i - 1].id];
+  // 3) Detect sequencing words and assign dependencies
+  const seqMarkers = /\b(first|then|next|after that|afterwards|finally|lastly|subsequently)\b/i;
+  const tasks: DecomposedTask[] = clauses.map((c, i) => ({ id: `t${i}`, text: c }));
+
+  // Set dependencies if sequence markers present in clauses or overarching text
+  if (seqMarkers.test(t) || clauses.some((c) => seqMarkers.test(c))) {
+    for (let i = 0; i < tasks.length; i++) {
+      if (i > 0) tasks[i].dependencies = [tasks[i - 1].id];
+      tasks[i].priority = tasks.length - i; // earlier tasks have higher priority
     }
+  } else {
+    // Default: no dependencies (parallelizable), but preserve order in ids
+    for (let i = 0; i < tasks.length; i++) tasks[i].priority = tasks.length - i;
   }
 
-  // Additional rule: if a sentence starts with numbering or 'first', enforce sequential deps across that block
-  // (we already split bullets earlier so a numbering style likely becomes its own sentence)
-
-  // If tests require more complex DAGs, this function can be extended; keep it simple for GEN1
   return tasks;
 }
 
-export async function decomposeIfNeeded(text: string, category: string) {
-  const tasks = decomposeRequest(text);
-  if (tasks.length === 0) return [{ id: 't0', text }];
+export function decomposeIfNeeded(text: string, category?: string) {
+  // Lightweight compatibility wrapper — actual decomposition is pure and deterministic
+  const tasks = decompose(text);
   return tasks;
 }
 
-export default { decomposeIfNeeded, decomposeRequest };
+export default { decompose, decomposeIfNeeded };

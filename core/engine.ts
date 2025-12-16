@@ -1,14 +1,21 @@
 import LRU from 'lru-cache';
-import { timeoutPromise } from '../lib/utils';
-import { classify } from './classifier';
 import { decomposeIfNeeded } from './decomposer';
 import { assemble } from './assembler';
-import { verifier } from './verifier';
-import { styleWrapper } from './styleWrapper';
-import { getMemory, upsertMemory } from './memory';
 import logger from './logger';
-import type { Category, MessageRequest, ModelResponse } from '../types';
-import openai from './models/openai';
+import type { Category, MessageRequest } from '../types';
+import { analyzeIntent } from './intentClassifier';
+import { routeTask } from './router';
+import { runAgents } from './agents/agent';
+import LogicalAuditorAgent from './agents/logicalAuditor';
+import StyleRefinementAgent from './agents/styleRefinement';
+import CostOptimizationAgent from './agents/costOptimization';
+import { executeWithFailover } from './retry';
+import { verifyPipeline } from './verifier';
+import { runSecurityChecks } from './security';
+import { getMemory, upsertMemory } from './memory';
+import { CostController } from './costController';
+import OpenAIProvider from './models/openaiProvider';
+import MockProvider from './models/mockProvider';
 
 // In-memory cache for responses (LRU, max 100 entries, 1h TTL)
 const cache = new LRU<string, any>({
@@ -18,8 +25,8 @@ const cache = new LRU<string, any>({
 
 // Rate limiter: token bucket per IP (in-memory for dev)
 const rateLimitBuckets = new Map<string, { tokens: number; lastRefill: number }>();
-const RATE_LIMIT_MAX_TOKENS = 10; // 10 requests per minute per IP
-const RATE_LIMIT_REFILL_MS = 60000; // 1 minute
+const RATE_LIMIT_MAX_TOKENS = 10; // 10 req/min
+const RATE_LIMIT_REFILL_MS = 60000;
 
 function checkRateLimit(ip: string): boolean {
   const now = Date.now();
@@ -30,8 +37,8 @@ function checkRateLimit(ip: string): boolean {
   }
 
   const elapsed = now - bucket.lastRefill;
-  const tokensToAdd = (elapsed / RATE_LIMIT_REFILL_MS) * RATE_LIMIT_MAX_TOKENS;
-  bucket.tokens = Math.min(RATE_LIMIT_MAX_TOKENS, bucket.tokens + tokensToAdd);
+  const refill = (elapsed / RATE_LIMIT_REFILL_MS) * RATE_LIMIT_MAX_TOKENS;
+  bucket.tokens = Math.min(RATE_LIMIT_MAX_TOKENS, bucket.tokens + refill);
   bucket.lastRefill = now;
 
   if (bucket.tokens >= 1) {
@@ -41,29 +48,25 @@ function checkRateLimit(ip: string): boolean {
   return false;
 }
 
-// Model selection rules
-export function selectModel(category: Category): { model: string; module: any; temperature: number } {
+// Category → model hint (router decides provider)
+export function selectModel(category: Category): { model: string; temperature: number } {
   switch (category) {
     case 'creative':
-      return { model: 'gpt-4o', module: openai, temperature: 0.9 };
+      return { model: 'gpt-4o', temperature: 0.9 };
     case 'emotional':
-      return { model: 'gpt-4o-mini', module: openai, temperature: 0.7 };
+      return { model: 'gpt-4o-mini', temperature: 0.7 };
     case 'code':
-      return { model: 'gpt-4o', module: openai, temperature: 0.1 };
+      return { model: 'gpt-4o', temperature: 0.1 };
     case 'vision':
-      return { model: 'gpt-4o', module: openai, temperature: 0.5 };
-    case 'current':
-      return { model: 'gpt-4o', module: openai, temperature: 0.6 };
+      return { model: 'gpt-4o', temperature: 0.5 };
     case 'math':
-      return { model: 'gpt-4o', module: openai, temperature: 0.2 };
+      return { model: 'gpt-4o', temperature: 0.2 };
     case 'branding':
-      return { model: 'gpt-4o', module: openai, temperature: 0.7 };
+      return { model: 'gpt-4o', temperature: 0.7 };
     case 'efficiency':
-      return { model: 'gpt-4o-mini', module: openai, temperature: 0.3 };
-    case 'informative':
-      return { model: 'gpt-4o', module: openai, temperature: 0.5 };
+      return { model: 'gpt-4o-mini', temperature: 0.3 };
     default:
-      return { model: 'gpt-4o', module: openai, temperature: 0.6 };
+      return { model: 'gpt-4o', temperature: 0.6 };
   }
 }
 
@@ -83,149 +86,180 @@ export async function handleMessage(
 ): Promise<EngineResult> {
   const startTime = Date.now();
   const errors: string[] = [];
+  const ctx: any = { request: req };
 
   try {
-    // 0. Rate limit check
+    /* RATE LIMIT */
+    logger.logPipelineStep(req.userId, 'rate_limit', 'start', { ip: clientIp });
     if (!checkRateLimit(clientIp)) {
+      logger.logPipelineStep(req.userId, 'rate_limit', 'error');
       return {
         ok: false,
         category: 'other',
         modelPlan: [],
-        response: 'Rate limit exceeded. Please try again in a moment.',
+        response: 'Rate limit exceeded.',
         tokensUsed: 0,
         estimatedCost: 0,
         errors: ['rate_limit']
       };
     }
+    logger.logPipelineStep(req.userId, 'rate_limit', 'end');
 
-    // 1. Cache check
-    const cacheKey = `msg:${req.userId}:${req.text.substring(0, 50)}`;
+    /* CACHE */
+    const cacheKey = `msg:${req.userId}:${req.text.slice(0, 200)}`;
     const cached = cache.get(cacheKey);
     if (cached) {
-      logger.info('Cache hit', { userId: req.userId, cacheKey });
+      logger.info('Cache hit', { cacheKey });
       return cached;
     }
 
-    // 2. Load user memory
-    const memory = await getMemory(req.userId);
-    logger.info('Memory loaded', { userId: req.userId, memorySize: memory.length });
+    /* SECURITY (PRE) */
+    logger.logPipelineStep(req.userId, 'security', 'start');
+    const preSec = runSecurityChecks(ctx);
+    if (preSec.some((s: any) => s.severity === 'high')) {
+      return {
+        ok: false,
+        category: 'other',
+        modelPlan: [],
+        response: 'Request blocked by security policy.',
+        tokensUsed: 0,
+        estimatedCost: 0,
+        errors: ['security_block']
+      };
+    }
+    logger.logPipelineStep(req.userId, 'security', 'end');
 
-    // 3. Classify
-    const { category, confidence } = await classify(req.text);
-    logger.info('Classified', { userId: req.userId, category, confidence });
+    /* MEMORY LOAD */
+    logger.logPipelineStep(req.userId, 'memory.load', 'start');
+    ctx.memorySnapshot = await getMemory(req.userId);
+    logger.logPipelineStep(req.userId, 'memory.load', 'end');
 
-    // 4. Decompose
-    const microTasks = await decomposeIfNeeded(req.text, category);
-    logger.info('Decomposed', {
-      userId: req.userId,
-      taskCount: microTasks.length,
-      taskIds: microTasks.map((t) => t.id)
-    });
+    /* INTENT */
+    logger.logPipelineStep(req.userId, 'classify', 'start');
+    const intent = analyzeIntent(req as any);
+    ctx.intent = intent;
+    logger.logPipelineStep(req.userId, 'classify', 'end');
 
-    // 5. Route: select models for each microtask
-    const plan = microTasks.map((task) => {
-      const { model, module } = selectModel(category);
-      return { taskId: task.id, taskText: task.text, model, module, category };
-    });
+    /* DECOMPOSE */
+    logger.logPipelineStep(req.userId, 'decompose', 'start');
+    const tasks = await decomposeIfNeeded(req.text, intent.category);
+    ctx.tasks = tasks;
+    logger.logPipelineStep(req.userId, 'decompose', 'end');
 
-    const modelPlan = plan.map((p) => p.model);
-    logger.info('Model plan', { userId: req.userId, modelPlan });
-
-    // 6. Execute in parallel with timeouts (30s per request)
-    const promises = plan.map((p) =>
-      timeoutPromise(
-        p.module.callModel({
-          prompt: p.taskText,
-          maxTokens: 512,
-          temperature: selectModel(p.category).temperature,
-          model: p.model
-        }),
-        30000,
-        () => {
-          logger.warn('Model timeout', { taskId: p.taskId, model: p.model });
-          errors.push(`timeout:${p.model}`);
-        }
-      )
-    );
-
-    const results = await Promise.allSettled(promises);
-    logger.info('Model calls completed', {
-      userId: req.userId,
-      settled: results.map((r) => r.status),
-      errors
-    });
-
-    // 7. Assemble
-    const merged = await assemble(results as any);
-    logger.info('Assembled', { userId: req.userId, textLength: merged.text.length });
-
-    // 8. Verify (if technical)
-    let finalText = merged.text;
-    if (merged.containsTechnical) {
-      const verified = await verifier(merged);
-      finalText = verified.correctedText;
-      if (verified.corrections.length > 0) {
-        logger.info('Verifier corrections applied', {
-          userId: req.userId,
-          corrections: verified.corrections
-        });
+    /* AGENTS */
+    logger.logPipelineStep(req.userId, 'agents', 'start');
+    const agents = [LogicalAuditorAgent, StyleRefinementAgent, CostOptimizationAgent];
+    ctx.agentOutputs = {};
+    for (const t of tasks) {
+      const outs = await runAgents(agents, { taskId: t.id, text: t.text, ctx });
+      ctx.agentOutputs[t.id] = outs;
+      for (const o of outs) {
+        if (o.text && o.text !== t.text) t.text = o.text;
       }
     }
+    logger.logPipelineStep(req.userId, 'agents', 'end');
 
-    // 9. Style wrapper
-    const styledText = await styleWrapper({ text: finalText }, { xtreetTone: true });
-    logger.info('Style wrapper applied', { userId: req.userId });
+    /* ROUTING */
+    logger.logPipelineStep(req.userId, 'routing', 'start');
+    ctx.routing = {};
+    for (const t of tasks) ctx.routing[t.id] = routeTask(t, intent, ctx);
+    logger.logPipelineStep(req.userId, 'routing', 'end');
 
-    // 10. Update memory (optional, async)
-    if (req.userId) {
-      upsertMemory(req.userId, 'last_message', { text: req.text, category, at: new Date().toISOString() }).catch(
-        (e) => logger.error('Memory update error', { error: String(e) })
+    /* PROVIDERS */
+    logger.logPipelineStep(req.userId, 'providers', 'start');
+    const requestId = `${req.userId}:${Date.now()}`;
+    const costCtrl = new CostController({ userId: req.userId, requestId });
+    ctx.agentResults = {};
+
+    const providerCache: Record<string, any> = {};
+    const getProvider = (name: string) =>
+      providerCache[name] ??
+      (providerCache[name] =
+        name === 'openai' ? new OpenAIProvider() : new MockProvider());
+
+    for (const t of tasks) {
+      const decision = ctx.routing[t.id];
+      const providers = decision.candidates.map((c) => getProvider(c.provider));
+
+      const out = await executeWithFailover(
+        providers,
+        t.text,
+        { model: decision.selected?.model, maxTokens: 512 },
+        { backoff: 'exponential' }
       );
+
+      if (out.result) {
+        costCtrl.addUsage({
+          provider: out.providerId || 'unknown',
+          model: decision.selected?.model || 'unknown',
+          tokensOutput: out.result.tokensUsed || 0
+        });
+
+        ctx.agentResults[t.id] = [{
+          status: 'fulfilled',
+          text: out.result.text,
+          model: decision.selected?.model
+        }];
+      } else {
+        errors.push(`provider_error:${t.id}`);
+      }
     }
+    logger.logPipelineStep(req.userId, 'providers', 'end');
 
-    // 11. Calculate metrics
-    const totalTokens = results
-      .filter((r): r is PromiseFulfilledResult<ModelResponse> => r.status === 'fulfilled' && (r as any).value)
-      .reduce((sum, r) => sum + (r.value?.tokensUsed || 0), 0);
+    /* VERIFICATION */
+    logger.logPipelineStep(req.userId, 'verification', 'start');
+    ctx.verification = verifyPipeline(ctx);
+    logger.logPipelineStep(req.userId, 'verification', 'end');
 
-    // Rough cost estimate: $0.03/1k input, $0.06/1k output tokens (GPT-4o)
-    const estimatedCost = (totalTokens / 1000) * 0.045;
+    /* ASSEMBLE */
+    logger.logPipelineStep(req.userId, 'assemble', 'start');
+    const parts: string[] = [];
+    const modelPlan: string[] = [];
+    for (const t of tasks) {
+      const r = ctx.agentResults[t.id]?.[0];
+      if (r?.text) {
+        parts.push(r.text.trim());
+        modelPlan.push(r.model);
+      }
+    }
+    const mergedText = parts.join('\n\n');
+    logger.logPipelineStep(req.userId, 'assemble', 'end');
 
-    const elapsedMs = Date.now() - startTime;
-    logger.info('Message handled successfully', {
-      userId: req.userId,
-      category,
-      tokensUsed: totalTokens,
-      estimatedCost,
-      elapsedMs,
-      errors: errors.length > 0 ? errors : undefined
-    });
+    /* STYLE */
+    logger.logPipelineStep(req.userId, 'style', 'start');
+    const styled = await (await import('./styleWrapper')).styleWrapper(
+      { text: mergedText },
+      { xtreetTone: true }
+    );
+    logger.logPipelineStep(req.userId, 'style', 'end');
+
+    /* COST */
+    const costReport = costCtrl.getReport();
+    logger.logCostReport(req.userId, costReport);
 
     const result: EngineResult = {
-      ok: true,
-      category,
+      ok: errors.length === 0,
+      category: intent.category,
       modelPlan,
-      response: styledText,
-      tokensUsed: totalTokens,
-      estimatedCost,
-      errors: errors.length > 0 ? errors : undefined
+      response: styled.text || mergedText,
+      tokensUsed: costReport.totalTokens,
+      estimatedCost: costReport.estimatedCost,
+      errors: errors.length ? errors : undefined
     };
 
-    // Cache result
     cache.set(cacheKey, result);
-
     return result;
+
   } catch (e) {
-    const err = String(e);
-    logger.error('handleMessage fatal error', { error: err, userId: req.userId });
+    logger.error('Engine fatal error', { error: String(e) });
     return {
       ok: false,
       category: 'other',
       modelPlan: [],
-      response: 'An error occurred. Please try again later.',
+      response: 'Internal error.',
       tokensUsed: 0,
       estimatedCost: 0,
-      errors: [err]
+      errors: [String(e)]
     };
   }
 }
