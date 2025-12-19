@@ -42,7 +42,7 @@ export abstract class BaseModelProvider implements ModelProvider {
     const latency = Date.now() - start;
 
     return {
-      text: res.text,
+      text: res.text ?? '',
       tokensUsed: res.tokensUsed,
       meta: res.meta,
       latencyMs: latency,

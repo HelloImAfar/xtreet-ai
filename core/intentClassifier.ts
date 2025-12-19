@@ -81,10 +81,10 @@ function detectRisk(text: string) {
  * Analyze a RExRequest and produce an IntentProfile.
  * Logic is purely heuristic and replaceable via `rules` option.
  */
-export function analyzeIntent(
+export async function analyzeIntent(
   req: RExRequest,
   opts?: { rules?: IntentRule[]; ctx?: PipelineContext }
-): IntentProfile {
+): Promise<IntentProfile> {
   const text = req.text || '';
   const rules = opts?.rules ?? defaultRules;
 
@@ -95,34 +95,31 @@ export function analyzeIntent(
       if (res && (res.intent || res.category)) {
         const depth = detectDepth(text);
         const risk = detectRisk(text);
-        const intentProfile: IntentProfile = {
+        return {
           intent: res.intent ?? 'unknown',
           category: (res.category as Category) ?? ('other' as Category),
           confidence: res.confidence ?? 0.75,
-          risk: risk,
+          risk,
           entities: { depth: depth.depth, complexity: depth.complexity }
         };
-        return intentProfile;
       }
-    } catch (e) {
-      // ignore rule errors, continue
-      // rules are replaceable; a broken rule should not break classifier
+    } catch {
+      // ignore rule errors
     }
   }
 
-  // Fallback: use simple category classifier to get category and build profile
-  const cat = simpleCategoryClassifier(text);
+  // Fallback: async classifier
+  const cat = await simpleCategoryClassifier(text);
   const depth = detectDepth(text);
   const risk = detectRisk(text);
 
-  const intentProfile: IntentProfile = {
+  return {
     intent: 'unknown',
     category: cat.category,
     confidence: cat.confidence,
     risk,
     entities: { depth: depth.depth, complexity: depth.complexity }
   };
-  return intentProfile;
 }
 
 export default { analyzeIntent };

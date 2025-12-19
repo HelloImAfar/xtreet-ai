@@ -88,7 +88,7 @@ export function verifyAgentResult(result: AgentResult, ctx?: PipelineContext): V
   const corrections: string[] = [];
 
   // Instruction violation: check against original request text if available
-  const requestText = ctx?.request?.text || ctx?.request?.message || '';
+  const requestText = ctx?.request?.text || '';
   const instr = instructionViolationCheck(requestText, result.text || '');
   instr.issues.forEach((m) => issues.push({ type: 'instruction-violation', message: m, severity: 'high' }));
   corrections.push(...instr.corrections);

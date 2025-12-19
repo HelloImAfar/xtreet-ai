@@ -213,7 +213,7 @@ export function runSecurityChecks(
 ): SecurityIssue[] {
   const issues: SecurityIssue[] = [];
 
-  const reqText = ctx.request?.text || ctx.request?.message || '';
+  const reqText = ctx.request?.text || '';
   issues.push(...analyzePromptSafety(reqText));
 
   // Optional: check decomposed task definitions (not agent outputs)

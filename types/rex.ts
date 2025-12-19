@@ -1,19 +1,23 @@
 import type { Category, MessageRequest } from './index';
 
+/* ============================================================
+   REx — Core Types (GEN 1)
+   ============================================================ */
+
 /**
  * Request object entering the REx pipeline
  */
 export interface RExRequest extends MessageRequest {
   options?: {
     stream?: boolean;
-    costLimit?: number; // USD or token based threshold
+    costLimit?: number; // USD or token-based threshold
     priority?: 'low' | 'normal' | 'high';
     maxConcurrency?: number; // per-request concurrency hint
   };
 }
 
 /**
- * Intent profile returned by classifier/intent detector
+ * Intent profile returned by classifier / intent detector
  */
 export interface IntentProfile {
   intent: string; // short intent label
@@ -38,12 +42,19 @@ export interface DecomposedTask {
   priority?: number; // higher = execute earlier
 }
 
+/**
+ * Candidate model/provider for routing
+ */
 export interface ModelCandidate {
   provider: string; // e.g. 'openai', 'claude'
   model: string; // model id
   temperature?: number;
+
+  /** Routing heuristics */
   costEstimate?: number; // rough cost per 1k tokens or per call
   latencyEstimateMs?: number;
+  priority?: number; // lower = preferred (used by router scoring)
+
   reason?: string; // why selected as candidate
 }
 
@@ -77,11 +88,18 @@ export interface AgentResult {
  */
 export interface VerificationResult {
   verified: boolean;
-  corrections?: string[]; // textual corrections or notes
-  issues?: Array<{ type: string; message: string; severity?: 'low' | 'medium' | 'high' }>;
+  corrections?: string[];
+  issues?: Array<{
+    type: string;
+    message: string;
+    severity?: 'low' | 'medium' | 'high';
+  }>;
   details?: Record<string, any>;
 }
 
+/**
+ * Cost breakdown item
+ */
 export interface CostBreakdownItem {
   provider: string;
   model: string;
@@ -101,7 +119,7 @@ export interface CostReport {
 }
 
 /**
- * PipelineContext collects state as the request flows through the REx pipeline
+ * PipelineContext collects state as the request flows through REx
  */
 export interface PipelineContext {
   request: RExRequest;
@@ -112,7 +130,11 @@ export interface PipelineContext {
   agentResults?: Record<string, AgentResult[]>; // keyed by taskId
   verification?: Record<string, VerificationResult>;
   cost?: CostReport;
-  logs?: Array<{ ts: string; message: string; meta?: Record<string, any> }>;
+  logs?: Array<{
+    ts: string;
+    message: string;
+    meta?: Record<string, any>;
+  }>;
 }
 
 /**
@@ -121,9 +143,8 @@ export interface PipelineContext {
 export interface RExResponse {
   ok: boolean;
   text?: string; // final human-facing text
-  structured?: any; // structured/JSON payload for clients
-  context?: PipelineContext; // optional debug/telemetry info
+  structured?: any; // structured / JSON payload
+  context?: PipelineContext; // optional debug / telemetry
   cost?: CostReport;
   errors?: string[];
 }
-
