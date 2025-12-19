@@ -268,8 +268,17 @@ export async function handleMessage(
         continue;
       }
 
-      const providers = decision.candidates.map((c) =>
-        getProvider(c.provider)
+      let providers = decision.candidates
+        .map((c) => getProvider(c.provider))
+        .filter(Boolean);
+
+      if (providers.length === 0) {
+        providers = [new MockProvider()];
+      }
+
+            console.log(
+        '[ENGINE] Providers selected:',
+        providers.map((p) => p.id)
       );
 
       const out = await executeWithFailover(
