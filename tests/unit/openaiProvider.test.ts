@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
-import { OpenAIProvider } from '@/core/models/openaiProvider';
+import { OpenAIProvider } from '@/core/models/openai/openaiProvider';
 
 describe('OpenAIProvider', () => {
   let originalFetch: typeof globalThis.fetch;

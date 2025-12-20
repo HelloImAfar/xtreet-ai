@@ -1,6 +1,6 @@
-import logger from '../logger';
-import { timeoutPromise } from '../../lib/utils';
-import { BaseModelProvider, ExecuteConfig, ExecuteResult } from './provider';
+import logger from '../../logger';
+import { timeoutPromise } from '../../../lib/utils';
+import { BaseModelProvider, ExecuteConfig, ExecuteResult } from '../provider';
 
 const OPENAI_BASE = process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;

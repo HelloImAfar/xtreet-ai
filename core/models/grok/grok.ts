@@ -1,4 +1,4 @@
-import type { CallModelPayload, ModelResponse } from '../../types';
+import type { CallModelPayload, ModelResponse } from '../../../types';
 
 // Stub adapter for Grok (X/Twitter). Replace with real API calls when ready.
 export async function callModel(payload: CallModelPayload): Promise<ModelResponse> {

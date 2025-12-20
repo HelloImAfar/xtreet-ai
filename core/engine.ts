@@ -15,7 +15,7 @@ import { runSecurityChecks } from './security';
 import { getMemory } from './memory';
 import { CostController } from './costController';
 
-import OpenAIProvider from './models/openaiProvider';
+import OpenAIProvider from './models/openai/openaiProvider';
 import MockProvider from './models/mockProvider';
 
 import type {

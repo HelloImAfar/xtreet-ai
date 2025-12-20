@@ -1,6 +1,6 @@
-import { retry } from '../../lib/utils';
-import type { CallModelPayload, ModelResponse } from '../../types';
-import logger from '../logger';
+import { retry } from '../../../lib/utils';
+import type { CallModelPayload, ModelResponse } from '../../../types';
+import logger from '../../logger';
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_BASE = process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';

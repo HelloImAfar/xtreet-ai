@@ -1,4 +1,4 @@
-import openai from './models/openai';
+import openai from './models/openai/openai';
 
 export async function styleWrapper(merged: { text: string }, opts: { xtreetTone?: boolean } = {}) {
   // If XTreet tone requested, ask model to rewrite concisely
