@@ -77,7 +77,10 @@ function checkRateLimit(ip: string): boolean {
 /* -------------------------------------------------------------------------- */
 /*                              MODEL SELECTION                               */
 /* -------------------------------------------------------------------------- */
-
+/**
+ * GEN 1: simple, deterministic, transparent.
+ * GEN 2: this logic will be replaced by a strategic selector.
+ */
 export function selectModel(
   category: Category
 ): { model: string; temperature: number } {
@@ -125,17 +128,13 @@ export async function handleMessage(
 ): Promise<EngineResult> {
   const errors: string[] = [];
 
-  // Pipeline context MUST respect the contract
   const ctx: PipelineContext = {
     request: req as RExRequest
   };
 
   try {
     /* ------------------------------ RATE LIMIT ----------------------------- */
-    logger.logPipelineStep(req.userId, 'rate_limit', 'start');
-
     if (!checkRateLimit(clientIp)) {
-      logger.logPipelineStep(req.userId, 'rate_limit', 'error');
       return {
         ok: false,
         category: 'other',
@@ -147,23 +146,14 @@ export async function handleMessage(
       };
     }
 
-    logger.logPipelineStep(req.userId, 'rate_limit', 'end');
-
     /* -------------------------------- CACHE -------------------------------- */
     const cacheKey = `msg:${req.userId}:${req.text.slice(0, 200)}`;
     const cached = cache.get(cacheKey);
-
-    if (cached) {
-      logger.info('Cache hit', { cacheKey });
-      return cached;
-    }
+    if (cached) return cached;
 
     /* ---------------------------- SECURITY (PRE) ---------------------------- */
-    logger.logPipelineStep(req.userId, 'security', 'start');
-
     const preSecurity = runSecurityChecks(ctx);
     if (preSecurity.some((s) => s.severity === 'high')) {
-      logger.logPipelineStep(req.userId, 'security', 'error');
       return {
         ok: false,
         category: 'other',
@@ -175,34 +165,18 @@ export async function handleMessage(
       };
     }
 
-    logger.logPipelineStep(req.userId, 'security', 'end');
-
     /* ----------------------------- MEMORY LOAD ------------------------------ */
-    logger.logPipelineStep(req.userId, 'memory.load', 'start');
-
     ctx.memorySnapshot = await getMemory(req.userId);
 
-    logger.logPipelineStep(req.userId, 'memory.load', 'end');
-
     /* ------------------------------- INTENT -------------------------------- */
-    logger.logPipelineStep(req.userId, 'intent', 'start');
-
     const intent = await analyzeIntent(req);
     ctx.intent = intent;
 
-    logger.logPipelineStep(req.userId, 'intent', 'end');
-
     /* ------------------------------ DECOMPOSE ------------------------------- */
-    logger.logPipelineStep(req.userId, 'decompose', 'start');
-
     const tasks = await decomposeIfNeeded(req.text, intent.category);
     ctx.tasks = tasks;
 
-    logger.logPipelineStep(req.userId, 'decompose', 'end');
-
     /* -------------------------------- AGENTS -------------------------------- */
-    logger.logPipelineStep(req.userId, 'agents', 'start');
-
     const agents = [
       LogicalAuditorAgent,
       StyleRefinementAgent,
@@ -220,7 +194,6 @@ export async function handleMessage(
 
       ctx.agentResults[task.id] = outputs as AgentResult[];
 
-      // Agents are allowed to mutate task text (by design)
       for (const o of outputs) {
         if (o.text && o.text !== task.text) {
           task.text = o.text;
@@ -228,21 +201,13 @@ export async function handleMessage(
       }
     }
 
-    logger.logPipelineStep(req.userId, 'agents', 'end');
-
     /* -------------------------------- ROUTING ------------------------------- */
-    logger.logPipelineStep(req.userId, 'routing', 'start');
-
     ctx.routing = {};
     for (const task of tasks) {
       ctx.routing[task.id] = routeTask(task, intent, ctx);
     }
 
-    logger.logPipelineStep(req.userId, 'routing', 'end');
-
     /* ------------------------------- PROVIDERS ------------------------------ */
-    logger.logPipelineStep(req.userId, 'providers', 'start');
-
     const requestId = `${req.userId}:${Date.now()}`;
     const costController = new CostController({
       userId: req.userId,
@@ -276,29 +241,27 @@ export async function handleMessage(
         providers = [new MockProvider()];
       }
 
-            console.log(
-        '[ENGINE] Providers selected:',
-        providers.map((p) => p.id)
-      );
-
       const out = await executeWithFailover(
         providers,
         task.text,
         {
           model: decision.selected?.model,
           maxTokens: 512
-        },
-        { backoff: 'exponential' }
+        }
       );
 
-      if (out?.result?.text) {
-        costController.addUsage({
-          provider: out.providerId ?? 'unknown',
-          model: decision.selected?.model ?? 'unknown',
-          tokensOutput: out.result.tokensUsed ?? 0
-        });
+      if (!out?.result?.text) {
+        errors.push(`provider_error:${task.id}`);
+        continue;
+      }
 
-      ctx.agentResults![task.id] = [
+      costController.addUsage({
+        provider: out.providerId ?? 'unknown',
+        model: decision.selected?.model ?? 'unknown',
+        tokensOutput: out.result.tokensUsed ?? 0
+      });
+
+      ctx.agentResults[task.id] = [
         {
           taskId: task.id,
           provider: out.providerId ?? 'unknown',
@@ -308,60 +271,47 @@ export async function handleMessage(
           tokensUsed: out.result.tokensUsed
         }
       ];
-
-      } else {
-        errors.push(`provider_error:${task.id}`);
-      }
     }
 
-    logger.logPipelineStep(req.userId, 'providers', 'end');
-
     /* ------------------------------ VERIFICATION ---------------------------- */
-    logger.logPipelineStep(req.userId, 'verification', 'start');
-
     ctx.verification = verifyPipeline(ctx);
 
-    logger.logPipelineStep(req.userId, 'verification', 'end');
-
     /* -------------------------------- ASSEMBLE ------------------------------ */
-    logger.logPipelineStep(req.userId, 'assemble', 'start');
-
     const parts: string[] = [];
     const modelPlan: string[] = [];
+    const assembleInput: Array<{ status: 'fulfilled' | 'rejected'; value?: { text: string } }> = [];
 
     for (const task of tasks) {
       const r = ctx.agentResults?.[task.id]?.[0];
       if (r?.text) {
         parts.push(r.text.trim());
-        if (r.model) modelPlan.push(r.model);
+        modelPlan.push(r.model);
+        assembleInput.push({
+          status: 'fulfilled',
+          value: { text: r.text }
+        });
       }
     }
 
-    const mergedText = parts.join('\n\n');
-
-    logger.logPipelineStep(req.userId, 'assemble', 'end');
+    const mergedText = await assemble(assembleInput);
 
     /* --------------------------------- STYLE -------------------------------- */
-    logger.logPipelineStep(req.userId, 'style', 'start');
-
-    const styled = await (
+    const styleWrapperResult = await (
       await import('./styleWrapper')
     ).styleWrapper(
-      { text: mergedText },
+      mergedText,
       { xtreetTone: true }
     );
-
-    logger.logPipelineStep(req.userId, 'style', 'end');
+    const styled = styleWrapperResult ?? mergedText;
 
     /* ---------------------------------- COST -------------------------------- */
     const costReport = costController.getReport();
-    logger.logCostReport(req.userId, costReport);
 
     const result: EngineResult = {
       ok: errors.length === 0,
       category: intent.category,
       modelPlan,
-      response: styled ?? mergedText,
+      response: styled,
       tokensUsed: costReport.totalTokens,
       estimatedCost: costReport.estimatedCost,
       errors: errors.length ? errors : undefined
