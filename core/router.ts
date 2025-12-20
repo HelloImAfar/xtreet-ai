@@ -5,27 +5,34 @@ import type {
   ModelCandidate,
   PipelineContext
 } from '@/types/rex';
-import { getProvidersOrdered, getConfig } from './config';
 
-export type ScoringStrategy = (candidate: ModelCandidate, task: DecomposedTask, intent?: IntentProfile, ctx?: PipelineContext) => number;
+import { getProvidersOrdered, getConfig } from './config';
+import { selectStrategicModel } from './strategicModelSelector';
+
+/* -------------------------------------------------------------------------- */
+/*                                  SCORING                                   */
+/* -------------------------------------------------------------------------- */
+
+export type ScoringStrategy = (
+  candidate: ModelCandidate,
+  task: DecomposedTask,
+  intent?: IntentProfile,
+  ctx?: PipelineContext
+) => number;
 
 /**
  * Default scoring strategy balances priority, estimated cost and latency.
  * Lower score is better.
  */
 export const defaultScoring: ScoringStrategy = (candidate, task) => {
-  // simple heuristics: cost (lower better), priority (lower better), latencyEstimateMs (lower better)
   const cost = candidate.costEstimate ?? 1;
   const priority = candidate.priority ?? 100;
   const latency = candidate.latencyEstimateMs ?? 200;
 
-  // estimate tokens roughly from task length (words/4)
   const words = task.text.split(/\s+/).filter(Boolean).length;
   const estTokens = Math.max(1, Math.round(words / 4));
 
-  // normalized score
-  const score = cost * estTokens * 1.0 + priority * 0.5 + latency / 100.0;
-  return score;
+  return cost * estTokens + priority * 0.5 + latency / 100;
 };
 
 export interface RouterOptions {
@@ -33,32 +40,43 @@ export interface RouterOptions {
   maxCandidates?: number;
 }
 
-/**
- * Build ModelCandidate list from provider configs. Non-invasive, no external calls.
- */
+/* -------------------------------------------------------------------------- */
+/*                          CANDIDATE CONSTRUCTION                             */
+/* -------------------------------------------------------------------------- */
+
 function buildCandidates(maxCandidates = 3): ModelCandidate[] {
   const providers = getProvidersOrdered();
   const out: ModelCandidate[] = [];
+
   for (const p of providers) {
     if (!p.enabled) continue;
-    // meta may include defaults for cost/latency
+
     const meta = p.meta || {};
+
     out.push({
       provider: p.name,
       model: meta.defaultModel || `${p.name}-default`,
       temperature: meta.defaultTemperature,
-      costEstimate: meta.costPer1k || meta.costEstimate || undefined,
-      latencyEstimateMs: meta.latencyMs || undefined,
+      costEstimate: meta.costPer1k || meta.costEstimate,
+      latencyEstimateMs: meta.latencyMs,
       reason: 'from-config'
     });
+
     if (out.length >= maxCandidates) break;
   }
+
   return out;
 }
 
+/* -------------------------------------------------------------------------- */
+/*                                   ROUTER                                   */
+/* -------------------------------------------------------------------------- */
+
 /**
- * Route a single task to providers. Returns a RoutingDecision object.
- * Logic is strategy-driven and replaceable; no provider calls are made here.
+ * Route a single task to providers.
+ * - NO provider calls
+ * - Deterministic
+ * - GEN 1 compatible
  */
 export function routeTask(
   task: DecomposedTask,
@@ -70,31 +88,72 @@ export function routeTask(
   const scoring = opts.scoring ?? defaultScoring;
   const maxCandidates = opts.maxCandidates ?? 4;
 
-  // Build candidates from configured providers
-  const candidates = buildCandidates(maxCandidates);
+  /* ------------------------- BASE CANDIDATES ------------------------- */
 
-  // Score candidates
-  const scored = candidates.map((c) => ({ c, score: scoring(c, task, intent, ctx) }));
+  let candidates = buildCandidates(maxCandidates);
+
+  /* ------------------- STRATEGIC MODEL SELECTION --------------------- */
+  /**
+   * Optional intelligence layer:
+   * - If selector succeeds → boost matching candidate
+   * - If selector fails → ignore completely (GEN 1 safety)
+   */
+  try {
+    if (intent?.category) {
+      const strategy = selectStrategicModel(
+        intent.category,
+        intent.confidence,
+        (intent.entities as any)?.complexity ?? 'medium'
+      );
+
+      candidates = candidates.map((c) =>
+        c.provider === strategy.provider
+          ? {
+              ...c,
+              model: strategy.model,
+              temperature: strategy.temperature,
+              reason: `strategic:${strategy.reason}`
+            }
+          : c
+      );
+    }
+  } catch {
+    // selector failure must NEVER break routing
+  }
+
+  /* ---------------------------- SCORING ------------------------------ */
+
+  const scored = candidates.map((c) => ({
+    c,
+    score: scoring(c, task, intent, ctx)
+  }));
+
   scored.sort((a, b) => a.score - b.score);
 
-  // Select top candidate as primary
   const selected = scored.length > 0 ? scored[0].c : candidates[0];
 
-  // Decide whether to parallelize: enable multicore for deep/complex tasks or if feature flag set
+  /* --------------------------- PARALLEL ------------------------------ */
+
   let parallel = false;
   try {
     const features = cfg.features;
-    const isMulticoreEnabled = Boolean(features && (features.multicore as boolean));
-    const complexity = (ctx?.request?.meta?.complexity || (intent?.entities as any)?.complexity) as string | undefined;
-    if (isMulticoreEnabled && (complexity === 'high' || complexity === 'deep')) parallel = true;
-  } catch (e) {
+    const isMulticoreEnabled = Boolean(features?.multicore);
+    const complexity =
+      ctx?.request?.meta?.complexity ||
+      (intent?.entities as any)?.complexity;
+
+    if (isMulticoreEnabled && (complexity === 'high' || complexity === 'deep')) {
+      parallel = true;
+    }
+  } catch {
     parallel = false;
   }
 
-  // Build final RoutingDecision; include fallback chain in candidates order
+  /* ----------------------- FINAL DECISION ---------------------------- */
+
   const decision: RoutingDecision = {
     taskId: task.id,
-    candidates: scored.map((s) => s.c),
+    candidates: scored.map((s) => s.c), // ordered fallback chain
     selected,
     parallel
   };
