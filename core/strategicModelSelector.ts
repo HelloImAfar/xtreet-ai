@@ -1,151 +1,137 @@
 /**
  * core/strategicModelSelector.ts
  *
- * GEN 1 — Strategic model selection
+ * GEN 1:
+ * - Selects an ordered execution plan (primary + fallbacks)
+ * - Multi-provider aware
+ * - Pure, deterministic, testable logic
  *
- * Responsibilities:
- * - Decide WHICH provider + model to use per task
- * - Fully deterministic and testable
- * - NO API calls
+ * IMPORTANT:
+ * - NO model calls
  * - NO provider imports
- *
- * GEN 2 will extend this with:
- * - multi-model ensembles
- * - DeepSeek review layer
- * - cost / latency telemetry
  */
 
 import type { Category } from '../types';
 
 /* -------------------------------------------------------------------------- */
-/*                                    TYPES                                   */
+/*                                   TYPES                                    */
 /* -------------------------------------------------------------------------- */
 
 export type TaskComplexity = 'low' | 'medium' | 'high';
 
-export type ProviderId =
-  | 'openai'
-  | 'claude'
-  | 'gemini'
-  | 'grok'
-  | 'llama'
-  | 'mistral'
-  | 'qwen';
-
-export interface ModelCandidate {
-  provider: ProviderId;
-  model: string;
-}
-
-export interface ModelSelection {
-  provider: ProviderId;
+export interface ModelChoice {
+  provider: string;
   model: string;
   temperature: number;
+}
+
+export interface ModelExecutionPlan {
+  primary: ModelChoice;
+  fallbacks: ModelChoice[];
   reason: string;
 }
 
 /* -------------------------------------------------------------------------- */
-/*                                  FALLBACK                                  */
+/*                             CATEGORY STRATEGY                              */
 /* -------------------------------------------------------------------------- */
 
-const FALLBACK: ModelSelection = {
-  provider: 'openai',
-  model: 'gpt-4o-mini',
-  temperature: 0.2,
-  reason: 'Fallback: safe default (GEN 1)',
-};
-
-/* -------------------------------------------------------------------------- */
-/*                          CATEGORY → MODEL STRATEGY                          */
-/* -------------------------------------------------------------------------- */
-
-const CATEGORY_PREFERENCES: Record<
+const CATEGORY_STRATEGY: Record<
   Category,
   {
-    candidates: ModelCandidate[];
+    orderedModels: Array<{ provider: string; model: string }>;
     baseTemp: number;
     rationale: string;
   }
 > = {
   creative: {
-    candidates: [
+    orderedModels: [
       { provider: 'claude', model: 'claude-3-opus' },
       { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'gemini', model: 'gemini-1.5-pro' },
+      { provider: 'mistral', model: 'mistral-large' }
     ],
     baseTemp: 0.7,
-    rationale: 'Creative tasks benefit from expressive and stylistic models.',
+    rationale: 'Creativity benefits from expressive, stylistic models.'
   },
 
   emotional: {
-    candidates: [
+    orderedModels: [
       { provider: 'claude', model: 'claude-3-opus' },
-      { provider: 'openai', model: 'gpt-4o' },
+      { provider: 'openai', model: 'gpt-4o' }
     ],
     baseTemp: 0.6,
-    rationale: 'Empathy and nuance are best handled by conversational models.',
+    rationale: 'Emotional nuance prefers empathetic language models.'
   },
 
   code: {
-    candidates: [
+    orderedModels: [
       { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'qwen', model: 'qwen-coder' },
-      { provider: 'mistral', model: 'mistral-large' },
+      { provider: 'deepseek', model: 'deepseek-coder' },
+      { provider: 'qwen', model: 'qwen-max' }
     ],
     baseTemp: 0.1,
-    rationale: 'Code requires precision and strong reasoning.',
+    rationale: 'Code requires precision and deterministic reasoning.'
   },
 
   math: {
-    candidates: [
+    orderedModels: [
       { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'mistral', model: 'mistral-large' },
+      { provider: 'deepseek', model: 'deepseek-math' }
     ],
     baseTemp: 0.0,
-    rationale: 'Math tasks demand deterministic reasoning.',
+    rationale: 'Math tasks must be strictly deterministic.'
   },
 
   vision: {
-    candidates: [
-      { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'gemini', model: 'gemini-1.5-pro' },
+    orderedModels: [
+      { provider: 'openai', model: 'gpt-4o' }
     ],
     baseTemp: 0.2,
-    rationale: 'Vision tasks require multimodal-capable models.',
+    rationale: 'Vision tasks rely on multimodal capability.'
   },
 
   branding: {
-    candidates: [
+    orderedModels: [
       { provider: 'claude', model: 'claude-3-opus' },
       { provider: 'openai', model: 'gpt-4o' },
+      { provider: 'mistral', model: 'mistral-large' }
     ],
     baseTemp: 0.6,
-    rationale: 'Brand voice needs controlled creativity.',
+    rationale: 'Brand voice requires controlled creativity.'
   },
 
   efficiency: {
-    candidates: [
-      { provider: 'mistral', model: 'mistral-small' },
-      { provider: 'llama', model: 'llama-3-8b' },
+    orderedModels: [
+      { provider: 'qwen', model: 'qwen-max' },
+      { provider: 'openai', model: 'gpt-4o-mini' }
     ],
     baseTemp: 0.15,
-    rationale: 'Efficiency favors speed and cost-effective models.',
+    rationale: 'Efficiency prioritizes speed and cost.'
   },
 
   informative: {
-    candidates: [
+    orderedModels: [
       { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'gemini', model: 'gemini-1.5-pro' },
+      { provider: 'claude', model: 'claude-3-sonnet' }
     ],
     baseTemp: 0.25,
-    rationale: 'Informative tasks prioritize clarity and accuracy.',
+    rationale: 'Informative tasks value clarity and accuracy.'
   },
 
   other: {
-    candidates: [{ provider: 'openai', model: 'gpt-4o-mini' }],
+    orderedModels: [
+      { provider: 'openai', model: 'gpt-4o-mini' }
+    ],
     baseTemp: 0.3,
-    rationale: 'Safe default for uncategorized tasks.',
+    rationale: 'Safe default for uncategorized tasks.'
   },
+
+  current: {
+    orderedModels: [
+      { provider: 'openai', model: 'gpt-4o' }
+    ],
+    baseTemp: 0.3,
+    rationale: 'Current tasks use general-purpose models.'
+  }
 };
 
 /* -------------------------------------------------------------------------- */
@@ -164,67 +150,39 @@ export function selectStrategicModel(
   category: Category,
   intentConfidence?: number,
   taskComplexity: TaskComplexity = 'medium'
-): ModelSelection {
-  try {
-    const prefs = CATEGORY_PREFERENCES[category];
-    if (!prefs) return FALLBACK;
+): ModelExecutionPlan {
+  const strategy = CATEGORY_STRATEGY[category] ?? CATEGORY_STRATEGY.other;
 
-    const confidence =
-      typeof intentConfidence === 'number'
-        ? clamp(intentConfidence, 0, 1)
-        : undefined;
+  let temperature = clamp(strategy.baseTemp);
 
-    /* ------------------------- MODEL PICKING ------------------------- */
-    let index = 0;
+  if (taskComplexity === 'high') temperature -= 0.15;
+  if (taskComplexity === 'low') temperature += 0.05;
 
-    if (taskComplexity === 'low' && prefs.candidates.length > 1) {
-      index = 1;
-    }
-
-    if (confidence !== undefined) {
-      if (confidence < 0.35 && prefs.candidates.length > 1) {
-        index = Math.min(index + 1, prefs.candidates.length - 1);
-      }
-      if (confidence > 0.9) {
-        index = 0;
-      }
-    }
-
-    const chosen =
-      prefs.candidates[Math.min(index, prefs.candidates.length - 1)];
-
-    /* ----------------------- TEMPERATURE ----------------------- */
-    let temperature = clamp(prefs.baseTemp);
-
-    if (taskComplexity === 'high') temperature -= 0.15;
-    if (taskComplexity === 'low') temperature += 0.05;
-
-    if (confidence !== undefined) {
-      if (confidence > 0.85) temperature -= 0.15;
-      if (confidence < 0.4) temperature += 0.15;
-    }
-
-    temperature = clamp(Math.round(temperature * 100) / 100);
-
-    return {
-      provider: chosen.provider,
-      model: chosen.model,
-      temperature,
-      reason: [
-        `Category=${category}`,
-        `Provider=${chosen.provider}`,
-        `Model=${chosen.model}`,
-        `Complexity=${taskComplexity}`,
-        confidence !== undefined
-          ? `IntentConfidence=${confidence}`
-          : 'IntentConfidence=n/a',
-        prefs.rationale,
-      ].join(' | '),
-    };
-  } catch (err) {
-    return {
-      ...FALLBACK,
-      reason: `Selector error: ${(err as Error).message}`,
-    };
+  if (typeof intentConfidence === 'number') {
+    if (intentConfidence > 0.85) temperature -= 0.15;
+    if (intentConfidence < 0.4) temperature += 0.15;
   }
+
+  temperature = clamp(Math.round(temperature * 100) / 100);
+
+  const [primaryModel, ...fallbackModels] = strategy.orderedModels;
+
+  return {
+    primary: {
+      ...primaryModel,
+      temperature
+    },
+    fallbacks: fallbackModels.map((m) => ({
+      ...m,
+      temperature
+    })),
+    reason: [
+      `Category: ${category}`,
+      `Complexity: ${taskComplexity}`,
+      intentConfidence !== undefined
+        ? `IntentConfidence: ${intentConfidence}`
+        : 'IntentConfidence: n/a',
+      strategy.rationale
+    ].join(' | ')
+  };
 }
