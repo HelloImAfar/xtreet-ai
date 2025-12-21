@@ -21,18 +21,32 @@ export type ScoringStrategy = (
 ) => number;
 
 /**
- * Default scoring strategy balances priority, estimated cost and latency.
- * Lower score is better.
+ * XTREET GEN 1 SCORING PRINCIPLE
+ *
+ * 1. Strategic quality defines the tier (cannot be overridden)
+ * 2. Cost / latency / size adjust ranking WITHIN the same tier
+ * 3. Lower score is better
  */
 export const defaultScoring: ScoringStrategy = (candidate, task) => {
+  /* ------------------------- STRATEGIC QUALITY ------------------------ */
+  // Strong advantage for strategically selected models
+  let qualityBias = 1000;
+
+  if (candidate.reason?.startsWith('strategic:')) {
+    qualityBias = 0; // primary strategic model
+  }
+
+  /* --------------------------- PRACTICAL FACTORS ---------------------- */
   const cost = candidate.costEstimate ?? 1;
-  const priority = candidate.priority ?? 100;
   const latency = candidate.latencyEstimateMs ?? 200;
 
   const words = task.text.split(/\s+/).filter(Boolean).length;
   const estTokens = Math.max(1, Math.round(words / 4));
 
-  return cost * estTokens + priority * 0.5 + latency / 100;
+  const practicalScore =
+    cost * estTokens + latency / 100;
+
+  return qualityBias + practicalScore;
 };
 
 export interface RouterOptions {
@@ -76,7 +90,7 @@ function buildCandidates(maxCandidates = 3): ModelCandidate[] {
  * Route a single task to providers.
  * - NO provider calls
  * - Deterministic
- * - GEN 1 compatible
+ * - Quality-first with practical constraints
  */
 export function routeTask(
   task: DecomposedTask,
@@ -94,9 +108,8 @@ export function routeTask(
 
   /* ------------------- STRATEGIC MODEL SELECTION --------------------- */
   /**
-   * Optional intelligence layer:
-   * - If selector succeeds → boost matching candidate
-   * - If selector fails → ignore completely (GEN 1 safety)
+   * Defines QUALITY ORDER.
+   * This must NEVER be overridden by cost/latency alone.
    */
   try {
     if (intent?.category) {
@@ -107,18 +120,18 @@ export function routeTask(
       );
 
       candidates = candidates.map((c) =>
-        c.provider === strategy.provider
+        c.provider === strategy.primary.provider
           ? {
               ...c,
-              model: strategy.model,
-              temperature: strategy.temperature,
+              model: strategy.primary.model,
+              temperature: strategy.primary.temperature,
               reason: `strategic:${strategy.reason}`
             }
           : c
       );
     }
   } catch {
-    // selector failure must NEVER break routing
+    // Strategy failure must NEVER break routing
   }
 
   /* ---------------------------- SCORING ------------------------------ */
@@ -153,7 +166,7 @@ export function routeTask(
 
   const decision: RoutingDecision = {
     taskId: task.id,
-    candidates: scored.map((s) => s.c), // ordered fallback chain
+    candidates: scored.map((s) => s.c), // ordered from best → worst
     selected,
     parallel
   };

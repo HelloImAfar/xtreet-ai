@@ -15,7 +15,15 @@ import { runSecurityChecks } from './security';
 import { getMemory } from './memory';
 import { CostController } from './costController';
 
+/* ----------------------------- PROVIDERS --------------------------------- */
 import OpenAIProvider from './models/openai/openaiProvider';
+import ClaudeProvider from './models/claude/claudeProvider';
+import DeepSeekProvider from './models/deepseek/deepseekProvider';
+import GrokProvider from './models/grok/grokProvider';
+import GeminiProvider from './models/gemini/geminiProvider';
+import LlamaProvider from './models/llama/llamaProvider';
+import MistralProvider from './models/mistral/mistralProvider';
+import QwenProvider from './models/qwen/qwenProvider';
 import MockProvider from './models/mockProvider';
 
 import type {
@@ -32,17 +40,14 @@ import type {
 
 const cache = new LRU<string, any>({
   max: 100,
-  ttl: 1000 * 60 * 60 // 1h
+  ttl: 1000 * 60 * 60
 });
 
 /* -------------------------------------------------------------------------- */
 /*                                RATE LIMIT                                  */
 /* -------------------------------------------------------------------------- */
 
-const rateLimitBuckets = new Map<
-  string,
-  { tokens: number; lastRefill: number }
->();
+const rateLimitBuckets = new Map<string, { tokens: number; lastRefill: number }>();
 
 const RATE_LIMIT_MAX_TOKENS = 10;
 const RATE_LIMIT_REFILL_MS = 60_000;
@@ -57,13 +62,9 @@ function checkRateLimit(ip: string): boolean {
   }
 
   const elapsed = now - bucket.lastRefill;
-  const refill =
-    (elapsed / RATE_LIMIT_REFILL_MS) * RATE_LIMIT_MAX_TOKENS;
+  const refill = (elapsed / RATE_LIMIT_REFILL_MS) * RATE_LIMIT_MAX_TOKENS;
 
-  bucket.tokens = Math.min(
-    RATE_LIMIT_MAX_TOKENS,
-    bucket.tokens + refill
-  );
+  bucket.tokens = Math.min(RATE_LIMIT_MAX_TOKENS, bucket.tokens + refill);
   bucket.lastRefill = now;
 
   if (bucket.tokens >= 1) {
@@ -75,34 +76,30 @@ function checkRateLimit(ip: string): boolean {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                              MODEL SELECTION                               */
+/*                              PROVIDER REGISTRY                              */
 /* -------------------------------------------------------------------------- */
-/**
- * GEN 1: simple, deterministic, transparent.
- * GEN 2: this logic will be replaced by a strategic selector.
- */
-export function selectModel(
-  category: Category
-): { model: string; temperature: number } {
-  switch (category) {
-    case 'creative':
-      return { model: 'gpt-4o', temperature: 0.9 };
-    case 'emotional':
-      return { model: 'gpt-4o-mini', temperature: 0.7 };
-    case 'code':
-      return { model: 'gpt-4o', temperature: 0.1 };
-    case 'vision':
-      return { model: 'gpt-4o', temperature: 0.5 };
-    case 'math':
-      return { model: 'gpt-4o', temperature: 0.2 };
-    case 'branding':
-      return { model: 'gpt-4o', temperature: 0.7 };
-    case 'efficiency':
-      return { model: 'gpt-4o-mini', temperature: 0.3 };
-    default:
-      return { model: 'gpt-4o', temperature: 0.6 };
-  }
-}
+
+type ProviderInstance =
+  | OpenAIProvider
+  | ClaudeProvider
+  | DeepSeekProvider
+  | GrokProvider
+  | GeminiProvider
+  | LlamaProvider
+  | MistralProvider
+  | QwenProvider
+  | MockProvider;
+
+const providerFactories: Record<string, () => ProviderInstance> = {
+  openai: () => new OpenAIProvider(),
+  claude: () => new ClaudeProvider(),
+  deepseek: () => new DeepSeekProvider(),
+  grok: () => new GrokProvider(),
+  gemini: () => new GeminiProvider(),
+  llama: () => new LlamaProvider(),
+  mistral: () => new MistralProvider(),
+  qwen: () => new QwenProvider()
+};
 
 /* -------------------------------------------------------------------------- */
 /*                                 RESULT                                     */
@@ -214,14 +211,12 @@ export async function handleMessage(
       requestId
     });
 
-    const providerCache: Record<string, OpenAIProvider | MockProvider> = {};
+    const providerCache: Record<string, ProviderInstance> = {};
 
-    const getProvider = (name: string) => {
+    const getProvider = (name: string): ProviderInstance => {
       if (!providerCache[name]) {
         providerCache[name] =
-          name === 'openai'
-            ? new OpenAIProvider()
-            : new MockProvider();
+          providerFactories[name]?.() ?? new MockProvider();
       }
       return providerCache[name];
     };
@@ -233,16 +228,12 @@ export async function handleMessage(
         continue;
       }
 
-      let providers = decision.candidates
+      const providers = decision.candidates
         .map((c) => getProvider(c.provider))
         .filter(Boolean);
 
-      if (providers.length === 0) {
-        providers = [new MockProvider()];
-      }
-
       const out = await executeWithFailover(
-        providers,
+        providers.length ? providers : [new MockProvider()],
         task.text,
         {
           model: decision.selected?.model,
@@ -277,14 +268,15 @@ export async function handleMessage(
     ctx.verification = verifyPipeline(ctx);
 
     /* -------------------------------- ASSEMBLE ------------------------------ */
-    const parts: string[] = [];
     const modelPlan: string[] = [];
-    const assembleInput: Array<{ status: 'fulfilled' | 'rejected'; value?: { text: string } }> = [];
+    const assembleInput: Array<{
+      status: 'fulfilled' | 'rejected';
+      value?: { text: string };
+    }> = [];
 
     for (const task of tasks) {
       const r = ctx.agentResults?.[task.id]?.[0];
       if (r?.text) {
-        parts.push(r.text.trim());
         modelPlan.push(r.model);
         assembleInput.push({
           status: 'fulfilled',
@@ -296,13 +288,11 @@ export async function handleMessage(
     const mergedText = await assemble(assembleInput);
 
     /* --------------------------------- STYLE -------------------------------- */
-    const styleWrapperResult = await (
-      await import('./styleWrapper')
-    ).styleWrapper(
-      mergedText,
-      { xtreetTone: true }
-    );
-    const styled = styleWrapperResult ?? mergedText;
+    const styled =
+      (await (await import('./styleWrapper')).styleWrapper(
+        mergedText,
+        { xtreetTone: true }
+      )) ?? mergedText;
 
     /* ---------------------------------- COST -------------------------------- */
     const costReport = costController.getReport();
@@ -336,6 +326,5 @@ export async function handleMessage(
 
 export default {
   handleMessage,
-  selectModel,
   checkRateLimit
 };
