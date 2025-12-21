@@ -8,7 +8,8 @@ export type Category =
   | 'branding'
   | 'efficiency'
   | 'informative'
-  | 'other';
+  | 'other'
+  | 'fast';
 
 export interface MessageRequest {
   userId?: string;

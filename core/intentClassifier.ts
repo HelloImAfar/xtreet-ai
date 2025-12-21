@@ -9,6 +9,38 @@ export type IntentRule = (
 
 /** Default rule set (heuristic-based). Replaceable via options. */
 const defaultRules: IntentRule[] = [
+  /* ------------------------------------------------------------------ */
+  /* FAST — ultra simple, low-risk, low-complexity queries               */
+  /* ------------------------------------------------------------------ */
+  (text) => {
+    const t = text.toLowerCase().trim();
+    const words = t.split(/\s+/).filter(Boolean).length;
+
+    // Hard exclusions — fast must NEVER steal these
+    if (
+      /\b(write|create|story|poem|code|debug|fix|why|explain|analyze|design|brand|feel|sad|anxious|math|solve|calculate)\b/.test(t)
+    ) {
+      return null;
+    }
+
+    // Positive fast signals
+    if (
+      words <= 12 &&
+      /^(ok|okay|yes|no|sure|thanks|thank you|what now|next|continue|go on|summary|tl;dr|quick|short answer)/i.test(t)
+    ) {
+      return {
+        intent: 'fast_response',
+        category: 'fast' as Category,
+        confidence: 0.95
+      };
+    }
+
+    return null;
+  },
+
+  /* ------------------------------------------------------------------ */
+  /* CODE                                                               */
+  /* ------------------------------------------------------------------ */
   (text) => {
     const t = text.toLowerCase();
     if (/\b(error|exception|compile|stack trace|fix my|debug)\b/.test(t)) {
@@ -16,6 +48,10 @@ const defaultRules: IntentRule[] = [
     }
     return null;
   },
+
+  /* ------------------------------------------------------------------ */
+  /* CREATIVE                                                           */
+  /* ------------------------------------------------------------------ */
   (text) => {
     const t = text.toLowerCase();
     if (/\b(poem|story|write a song|creative|compose|lyrics|slogan)\b/.test(t)) {
@@ -23,6 +59,10 @@ const defaultRules: IntentRule[] = [
     }
     return null;
   },
+
+  /* ------------------------------------------------------------------ */
+  /* EMOTIONAL                                                          */
+  /* ------------------------------------------------------------------ */
   (text) => {
     const t = text.toLowerCase();
     if (/\b(feel|sad|anxious|depressed|i am|help me)\b/.test(t)) {
@@ -30,6 +70,10 @@ const defaultRules: IntentRule[] = [
     }
     return null;
   },
+
+  /* ------------------------------------------------------------------ */
+  /* MATH                                                               */
+  /* ------------------------------------------------------------------ */
   (text) => {
     const t = text.toLowerCase();
     if (/\b(integral|derivative|solve|calculate|equation|prove|theorem)\b/.test(t)) {
@@ -37,6 +81,10 @@ const defaultRules: IntentRule[] = [
     }
     return null;
   },
+
+  /* ------------------------------------------------------------------ */
+  /* VISION                                                             */
+  /* ------------------------------------------------------------------ */
   (text) => {
     const t = text.toLowerCase();
     if (/\b(image|photo|describe image|vision|analyze image)\b/.test(t)) {
@@ -44,6 +92,10 @@ const defaultRules: IntentRule[] = [
     }
     return null;
   },
+
+  /* ------------------------------------------------------------------ */
+  /* INFORMATIVE                                                        */
+  /* ------------------------------------------------------------------ */
   (text) => {
     const t = text.toLowerCase();
     if (/\b(what is|who is|explain|tell me about|information|define)\b/.test(t)) {
@@ -51,6 +103,10 @@ const defaultRules: IntentRule[] = [
     }
     return null;
   },
+
+  /* ------------------------------------------------------------------ */
+  /* SYNTHESIS / OTHER                                                   */
+  /* ------------------------------------------------------------------ */
   (text) => {
     const t = text.toLowerCase();
     if (/\b(compare|contrast|pros and cons|analyze|synthesize|summarize)\b/.test(t)) {
@@ -88,7 +144,6 @@ export async function analyzeIntent(
   const text = req.text || '';
   const rules = opts?.rules ?? defaultRules;
 
-  // Run rules
   for (const r of rules) {
     try {
       const res = r(text, opts?.ctx);

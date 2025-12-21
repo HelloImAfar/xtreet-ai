@@ -13,8 +13,14 @@ export interface FeatureFlags {
 export interface ProviderConfig {
   name: string;
   enabled: boolean;
-  priority?: number; // lower is higher priority (1 = top)
-  meta?: Record<string, any>;
+  priority?: number; // lower = higher priority
+  meta?: {
+    defaultModel?: string;
+    defaultTemperature?: number;
+    costPer1k?: number;
+    latencyMs?: number;
+    [key: string]: any;
+  };
 }
 
 export interface RExConfig {
@@ -27,11 +33,14 @@ export interface RExConfig {
   providers: ProviderConfig[];
 }
 
+/* -------------------------------------------------------------------------- */
+/*                                   UTILS                                    */
+/* -------------------------------------------------------------------------- */
+
 function parseNumber(envVar?: string): number | undefined {
   if (!envVar) return undefined;
   const n = Number(envVar);
-  if (Number.isFinite(n)) return n;
-  return undefined;
+  return Number.isFinite(n) ? n : undefined;
 }
 
 function parseBoolean(envVar?: string): boolean {
@@ -39,8 +48,11 @@ function parseBoolean(envVar?: string): boolean {
   return ['1', 'true', 'yes', 'on'].includes(envVar.toLowerCase());
 }
 
+/* -------------------------------------------------------------------------- */
+/*                              FEATURE FLAGS                                 */
+/* -------------------------------------------------------------------------- */
+
 function parseFeatureFlags(): FeatureFlags {
-  // Default flags false; variable-driven
   const flags: FeatureFlags = {
     multicore: parseBoolean(process.env.REX_FEATURE_MULTICORE),
     sei: parseBoolean(process.env.REX_FEATURE_SEI),
@@ -48,7 +60,6 @@ function parseFeatureFlags(): FeatureFlags {
     signalLayer: parseBoolean(process.env.REX_FEATURE_SIGNAL_LAYER)
   };
 
-  // Also allow a comma-separated list: REX_FEATURES=multicore,sei
   const csv = process.env.REX_FEATURES;
   if (csv) {
     for (const f of csv.split(',').map((s) => s.trim()).filter(Boolean)) {
@@ -59,37 +70,109 @@ function parseFeatureFlags(): FeatureFlags {
   return flags;
 }
 
+/* -------------------------------------------------------------------------- */
+/*                                PROVIDERS                                   */
+/* -------------------------------------------------------------------------- */
+
 function parseProviders(): ProviderConfig[] {
   const out: ProviderConfig[] = [];
 
-  const csv = process.env.REX_PROVIDERS; // format: name[:priority],name2[:priority]
+  /**
+   * Explicit list (optional)
+   * REX_PROVIDERS=openai:1,groq:2,gemini:3
+   */
+  const csv = process.env.REX_PROVIDERS;
   if (csv) {
     for (const item of csv.split(',').map((s) => s.trim()).filter(Boolean)) {
-      const [rawName, pr] = item.split(':').map((x) => x.trim());
-      const name = rawName;
+      const [rawName, pr] = item.split(':');
+      const name = rawName.toLowerCase();
       const priority = pr ? parseInt(pr, 10) : undefined;
       const enabledEnv = process.env[`REX_PROVIDER_${name.toUpperCase()}_ENABLED`];
-      const enabled = enabledEnv ? parseBoolean(enabledEnv) : true; // if explicitly listed, default to enabled
+      const enabled = enabledEnv ? parseBoolean(enabledEnv) : true;
+
       out.push({ name, enabled, priority });
     }
   }
 
-  // Also discover common providers via *_API_KEY env var and include them if not already present
-  const wellKnown = ['OPENAI', 'CLAUDE', 'GEMINI', 'GROK', 'QWEN', 'MISTRAL', 'LLAMA'];
-  for (const key of wellKnown) {
+  /**
+   * Auto-detect providers via API keys
+   * IMPORTANT:
+   * - Groq is a provider
+   * - LLaMA is NOT a provider → DO NOT auto-register it
+   */
+  const wellKnownProviders = [
+    'OPENAI',
+    'CLAUDE',
+    'GEMINI',
+    'GROQ',
+    'QWEN',
+    'MISTRAL',
+    'DEEPSEEK'
+  ];
+
+  for (const key of wellKnownProviders) {
     const apiKey = process.env[`${key}_API_KEY`];
-    if (apiKey) {
-      const name = key.toLowerCase();
-      if (!out.find((p) => p.name === name)) {
-        out.push({ name, enabled: true });
-      }
+    if (!apiKey) continue;
+
+    const name = key.toLowerCase();
+    if (!out.find((p) => p.name === name)) {
+      out.push({
+        name,
+        enabled: true
+      });
     }
   }
 
-  // Normalize priorities if any present
+  /**
+   * Provider metadata (GEN 1 heuristics)
+   * Used for routing + scoring
+   */
+  for (const p of out) {
+    if (!p.meta) p.meta = {};
+
+    switch (p.name) {
+      case 'openai':
+        p.meta.defaultModel = 'gpt-4o';
+        p.meta.defaultTemperature = 0.6;
+        p.meta.costPer1k = 0.01;
+        p.meta.latencyMs = 400;
+        break;
+
+      case 'groq':
+        p.meta.defaultModel = 'llama-3.1-70b';
+        p.meta.defaultTemperature = 0.4;
+        p.meta.costPer1k = 0.0005;
+        p.meta.latencyMs = 80;
+        break;
+
+      case 'gemini':
+        p.meta.defaultModel = 'gemini-1.5-pro';
+        p.meta.defaultTemperature = 0.5;
+        p.meta.costPer1k = 0.002;
+        p.meta.latencyMs = 300;
+        break;
+
+      case 'mistral':
+        p.meta.defaultModel = 'mistral-large';
+        p.meta.defaultTemperature = 0.6;
+        p.meta.costPer1k = 0.003;
+        p.meta.latencyMs = 350;
+        break;
+
+      case 'deepseek':
+        p.meta.defaultModel = 'deepseek-coder';
+        p.meta.defaultTemperature = 0.2;
+        p.meta.costPer1k = 0.0008;
+        p.meta.latencyMs = 250;
+        break;
+    }
+  }
+
+  /**
+   * Normalize priorities
+   */
   const withPriority = out.filter((p) => typeof p.priority === 'number');
   if (withPriority.length > 0) {
-    // sort by priority and assign missing priorities after
     out.sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
     let next = 1;
     for (const p of out) {
@@ -102,15 +185,17 @@ function parseProviders(): ProviderConfig[] {
   return out;
 }
 
+/* -------------------------------------------------------------------------- */
+/*                                 CONFIG                                     */
+/* -------------------------------------------------------------------------- */
+
 function buildConfig(): RExConfig {
   const env = (process.env.REX_ENV || process.env.NODE_ENV || 'development') as Env;
+
   const costLimitUsd = parseNumber(process.env.REX_COST_LIMIT_USD);
   const tokenLimit = parseNumber(process.env.REX_TOKEN_LIMIT);
-  const defaultTimeoutMs = parseNumber(process.env.REX_DEFAULT_TIMEOUT_MS) ?? 30000;
-  const features = parseFeatureFlags();
-  const providers = parseProviders();
+  const defaultTimeoutMs = parseNumber(process.env.REX_DEFAULT_TIMEOUT_MS) ?? 30_000;
 
-  // Basic validation
   if (costLimitUsd !== undefined && costLimitUsd < 0) {
     logger.warn('Invalid REX_COST_LIMIT_USD, ignoring negative value');
   }
@@ -125,24 +210,29 @@ function buildConfig(): RExConfig {
     costLimitUsd: costLimitUsd ?? undefined,
     tokenLimit: tokenLimit ?? undefined,
     defaultTimeoutMs,
-    features,
-    providers
+    features: parseFeatureFlags(),
+    providers: parseProviders()
   });
 }
 
 const config = buildConfig();
+
+/* -------------------------------------------------------------------------- */
+/*                                   EXPORTS                                  */
+/* -------------------------------------------------------------------------- */
 
 export function getConfig(): Readonly<RExConfig> {
   return config;
 }
 
 export function isFeatureEnabled(name: keyof FeatureFlags | string): boolean {
-  // allow user-specified flags too
   return Boolean((config.features as any)[name]);
 }
 
 export function getProvidersOrdered(): ProviderConfig[] {
-  return [...config.providers].sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER));
+  return [...config.providers].sort(
+    (a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER)
+  );
 }
 
 export function getProvider(name: string): ProviderConfig | undefined {

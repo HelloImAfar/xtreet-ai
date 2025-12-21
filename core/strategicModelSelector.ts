@@ -1,14 +1,11 @@
 /**
  * core/strategicModelSelector.ts
  *
- * GEN 1:
- * - Selects an ordered execution plan (primary + fallbacks)
- * - Multi-provider aware
- * - Pure, deterministic, testable logic
+ * GEN 1 — FINAL, QUALITY-CORRECT VERSION
  *
- * IMPORTANT:
- * - NO model calls
- * - NO provider imports
+ * - Quality-first, reality-based ordering
+ * - Deterministic, testable, clean
+ * - No provider imports, no side effects
  */
 
 import type { Category } from '../types';
@@ -36,101 +33,135 @@ export interface ModelExecutionPlan {
 /* -------------------------------------------------------------------------- */
 
 const CATEGORY_STRATEGY: Record<
-  Category,
+  Category | 'fast',
   {
     orderedModels: Array<{ provider: string; model: string }>;
     baseTemp: number;
     rationale: string;
   }
 > = {
+  /* ----------------------------- CREATIVE ----------------------------- */
   creative: {
     orderedModels: [
       { provider: 'claude', model: 'claude-3-opus' },
       { provider: 'openai', model: 'gpt-4o' },
+      { provider: 'gemini', model: 'gemini-default' },
       { provider: 'mistral', model: 'mistral-large' }
     ],
     baseTemp: 0.7,
-    rationale: 'Creativity benefits from expressive, stylistic models.'
+    rationale: 'Deep creativity, symbolism, narrative coherence.'
   },
 
+  /* ----------------------------- EMOTIONAL ----------------------------- */
   emotional: {
     orderedModels: [
       { provider: 'claude', model: 'claude-3-opus' },
-      { provider: 'openai', model: 'gpt-4o' }
+      { provider: 'openai', model: 'gpt-4o' },
+      { provider: 'gemini', model: 'gemini-default' }
     ],
     baseTemp: 0.6,
-    rationale: 'Emotional nuance prefers empathetic language models.'
+    rationale: 'Empathy, emotional depth, human nuance.'
   },
 
+  /* -------------------------------- CODE ------------------------------- */
   code: {
     orderedModels: [
-      { provider: 'openai', model: 'gpt-4o' },
       { provider: 'deepseek', model: 'deepseek-coder' },
-      { provider: 'qwen', model: 'qwen-max' }
+      { provider: 'openai', model: 'gpt-4o' },
+      { provider: 'qwen', model: 'qwen-max' },
+      { provider: 'grok', model: 'grok-default' }
     ],
-    baseTemp: 0.1,
-    rationale: 'Code requires precision and deterministic reasoning.'
+    baseTemp: 0.05,
+    rationale: 'Correctness, reasoning, architecture over speed.'
   },
 
+  /* -------------------------------- MATH ------------------------------- */
   math: {
     orderedModels: [
+      { provider: 'deepseek', model: 'deepseek-math' },
       { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'deepseek', model: 'deepseek-math' }
+      { provider: 'grok', model: 'grok-default' }
     ],
     baseTemp: 0.0,
-    rationale: 'Math tasks must be strictly deterministic.'
+    rationale: 'Deterministic mathematical reasoning.'
   },
 
+  /* ------------------------------- VISION ------------------------------ */
   vision: {
     orderedModels: [
-      { provider: 'openai', model: 'gpt-4o' }
+      { provider: 'openai', model: 'gpt-4o' },
+      { provider: 'gemini', model: 'gemini-default' },
+      { provider: 'mistral', model: 'mistral-large' }
     ],
     baseTemp: 0.2,
-    rationale: 'Vision tasks rely on multimodal capability.'
+    rationale: 'Multimodal perception and image understanding.'
   },
 
+  /* ------------------------------ BRANDING ----------------------------- */
   branding: {
     orderedModels: [
       { provider: 'claude', model: 'claude-3-opus' },
       { provider: 'openai', model: 'gpt-4o' },
+      { provider: 'gemini', model: 'gemini-default' },
       { provider: 'mistral', model: 'mistral-large' }
     ],
-    baseTemp: 0.6,
-    rationale: 'Brand voice requires controlled creativity.'
+    baseTemp: 0.55,
+    rationale: 'Brand voice consistency, identity, controlled expression.'
   },
 
+  /* ----------------------------- EFFICIENCY ---------------------------- */
   efficiency: {
     orderedModels: [
+      { provider: 'openai', model: 'gpt-4o-mini' },
       { provider: 'qwen', model: 'qwen-max' },
-      { provider: 'openai', model: 'gpt-4o-mini' }
+      { provider: 'grok', model: 'grok-default' },
+      { provider: 'gemini', model: 'gemini-default' }
     ],
     baseTemp: 0.15,
-    rationale: 'Efficiency prioritizes speed and cost.'
+    rationale: 'Speed/cost tradeoff with acceptable quality.'
   },
 
+  /* ---------------------------- INFORMATIVE ---------------------------- */
   informative: {
     orderedModels: [
       { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'claude', model: 'claude-3-sonnet' }
+      { provider: 'claude', model: 'claude-3-sonnet' },
+      { provider: 'gemini', model: 'gemini-default' }
     ],
     baseTemp: 0.25,
-    rationale: 'Informative tasks value clarity and accuracy.'
+    rationale: 'Clarity, structure, factual accuracy.'
   },
 
+  /* ------------------------------- OTHER ------------------------------- */
   other: {
     orderedModels: [
-      { provider: 'openai', model: 'gpt-4o-mini' }
+      { provider: 'openai', model: 'gpt-4o-mini' },
+      { provider: 'gemini', model: 'gemini-default' },
+      { provider: 'grok', model: 'grok-default' }
     ],
     baseTemp: 0.3,
-    rationale: 'Safe default for uncategorized tasks.'
+    rationale: 'Safe general-purpose fallback.'
   },
 
+  /* ------------------------------ CURRENT ------------------------------ */
   current: {
     orderedModels: [
-      { provider: 'openai', model: 'gpt-4o' }
+      { provider: 'openai', model: 'gpt-4o' },
+      { provider: 'gemini', model: 'gemini-default' }
     ],
     baseTemp: 0.3,
-    rationale: 'Current tasks use general-purpose models.'
+    rationale: 'Most reliable up-to-date general intelligence.'
+  },
+
+  /* ------------------------------- FAST -------------------------------- */
+  fast: {
+    orderedModels: [
+      { provider: 'llama', model: 'llama-fast' },
+      { provider: 'grok', model: 'grok-default' },
+      { provider: 'openai', model: 'gpt-4o-mini' }
+    ],
+    baseTemp: 0.2,
+    rationale: 'Ultra-low latency responses where quality ceiling is acceptable.'
   }
 };
 
@@ -147,7 +178,7 @@ function clamp(x: number, min = 0, max = 1) {
 /* -------------------------------------------------------------------------- */
 
 export function selectStrategicModel(
-  category: Category,
+  category: Category | 'fast',
   intentConfidence?: number,
   taskComplexity: TaskComplexity = 'medium'
 ): ModelExecutionPlan {
@@ -159,23 +190,17 @@ export function selectStrategicModel(
   if (taskComplexity === 'low') temperature += 0.05;
 
   if (typeof intentConfidence === 'number') {
-    if (intentConfidence > 0.85) temperature -= 0.15;
-    if (intentConfidence < 0.4) temperature += 0.15;
+    if (intentConfidence > 0.85) temperature -= 0.12;
+    if (intentConfidence < 0.4) temperature += 0.12;
   }
 
   temperature = clamp(Math.round(temperature * 100) / 100);
 
-  const [primaryModel, ...fallbackModels] = strategy.orderedModels;
+  const [primary, ...fallbacks] = strategy.orderedModels;
 
   return {
-    primary: {
-      ...primaryModel,
-      temperature
-    },
-    fallbacks: fallbackModels.map((m) => ({
-      ...m,
-      temperature
-    })),
+    primary: { ...primary, temperature },
+    fallbacks: fallbacks.map((m) => ({ ...m, temperature })),
     reason: [
       `Category: ${category}`,
       `Complexity: ${taskComplexity}`,
