@@ -69,7 +69,7 @@ function buildCandidates(maxCandidates = 4): ModelCandidate[] {
 
     out.push({
       provider: p.name,
-      model: 'default', // 👈 CRITICAL: logical alias only
+      model: 'default', // 👈 logical alias only
       temperature: meta.defaultTemperature,
       costEstimate: meta.costPer1k || meta.costEstimate,
       latencyEstimateMs: meta.latencyMs,
@@ -105,6 +105,30 @@ export function routeTask(
   /* ------------------------- BASE CANDIDATES ------------------------- */
 
   let candidates = buildCandidates(maxCandidates);
+
+  /* ----------------------- FAST HEURISTIC (GEN 1) -------------------- */
+  /**
+   * Ultra-short, trivial inputs with high confidence
+   * are force-routed to FAST lane.
+   *
+   * Examples:
+   *  - "hi"
+   *  - "ok"
+   *  - "thanks"
+   */
+  const wordCount = task.text.split(/\s+/).filter(Boolean).length;
+
+  if (
+    wordCount <= 2 &&
+    intent &&
+    typeof intent.confidence === 'number' &&
+    intent.confidence > 0.8
+  ) {
+    intent = {
+      ...intent,
+      category: 'fast'
+    };
+  }
 
   /* ------------------- STRATEGIC MODEL SELECTION --------------------- */
 
