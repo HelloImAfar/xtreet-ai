@@ -23,9 +23,9 @@ export type ScoringStrategy = (
 /**
  * XTREET GEN 1 SCORING PRINCIPLE
  *
- * 1. Strategic quality DEFINES the tier (hard rule)
- * 2. Cost / latency ONLY order models inside the same tier
- * 3. Lower score is better
+ * 1. STRATEGY is a hard gate
+ * 2. Cost / latency only rank inside the same strategic tier
+ * 3. Lower score = better
  */
 export const defaultScoring: ScoringStrategy = (candidate, task) => {
   const words = task.text.split(/\s+/).filter(Boolean).length;
@@ -38,7 +38,7 @@ export const defaultScoring: ScoringStrategy = (candidate, task) => {
 
   // 🚨 HARD STRATEGIC GATE
   if (!candidate.reason?.startsWith('strategic:')) {
-    return 5_000 + practicalScore;
+    return 10_000 + practicalScore;
   }
 
   return practicalScore;
@@ -55,8 +55,8 @@ export interface RouterOptions {
 
 /**
  * Build base candidates.
- * ⚠️ Router NEVER selects physical models.
- * Uses logical aliases only.
+ * Router NEVER selects physical models.
+ * Logical aliases only.
  */
 function buildCandidates(maxCandidates = 4): ModelCandidate[] {
   const providers = getProvidersOrdered();
@@ -69,7 +69,7 @@ function buildCandidates(maxCandidates = 4): ModelCandidate[] {
 
     out.push({
       provider: p.name,
-      model: 'default', // logical alias only
+      model: 'default',
       temperature: meta.defaultTemperature,
       costEstimate: meta.costPer1k || meta.costEstimate,
       latencyEstimateMs: meta.latencyMs,
@@ -86,12 +86,6 @@ function buildCandidates(maxCandidates = 4): ModelCandidate[] {
 /*                                   ROUTER                                   */
 /* -------------------------------------------------------------------------- */
 
-/**
- * Route a single task.
- * - Deterministic
- * - Quality-first
- * - FAST is a HARD override (never scored)
- */
 export function routeTask(
   task: DecomposedTask,
   intent?: IntentProfile,
@@ -102,40 +96,32 @@ export function routeTask(
   const scoring = opts.scoring ?? defaultScoring;
   const maxCandidates = opts.maxCandidates ?? 4;
 
-  /* ------------------------------------------------------------------ */
-  /* 🚀 FAST — HARD OVERRIDE (NO SCORING, NO COMPETITION)                 */
-  /* ------------------------------------------------------------------ */
-
-  if (
-    intent?.category === 'fast' &&
-    intent.confidence >= 0.9 &&
-    (intent.entities as any)?.complexity === 'low'
-  ) {
-    const strategy = selectStrategicModel('fast', 1, 'low');
-
-    const selected: ModelCandidate = {
-      provider: strategy.primary.provider,
-      model: strategy.primary.model,
-      temperature: strategy.primary.temperature,
-      reason: `strategic:${strategy.reason}`
-    };
-
-    return {
-      taskId: task.id,
-      candidates: [selected],
-      selected,
-      parallel: false
-    };
-  }
-
   /* ------------------------- BASE CANDIDATES ------------------------- */
 
   let candidates = buildCandidates(maxCandidates);
 
+  /* --------------------------- FAST OVERRIDE ------------------------- */
+  /**
+   * FAST is deterministic.
+   * If intent is fast → force LLaMA lane.
+   */
+  if (intent?.category === 'fast') {
+    candidates = candidates.map((c) => {
+      if (c.provider !== 'llama') return c;
+
+      return {
+        ...c,
+        model: 'fast',
+        temperature: 0.2,
+        reason: 'strategic:fast-lane'
+      };
+    });
+  }
+
   /* ------------------- STRATEGIC MODEL SELECTION --------------------- */
 
   try {
-    if (intent?.category) {
+    if (intent?.category && intent.category !== 'fast') {
       const strategy = selectStrategicModel(
         intent.category,
         intent.confidence,
@@ -159,7 +145,9 @@ export function routeTask(
           };
         }
 
-        const fb = strategy.fallbacks.find((f) => f.provider === c.provider);
+        const fb = strategy.fallbacks.find(
+          (f) => f.provider === c.provider
+        );
 
         return {
           ...c,
@@ -170,7 +158,42 @@ export function routeTask(
       });
     }
   } catch {
-    // Strategy failure must NEVER break routing
+    // strategy failure must NEVER break routing
+  }
+
+  /* ------------------------ GLOBAL FAILSAFE -------------------------- */
+  /**
+   * Ensure at least one strategic candidate always exists.
+   * Order:
+   * 1. DeepSeek
+   * 2. Mistral
+   */
+  const hasStrategic = candidates.some((c) =>
+    c.reason?.startsWith('strategic:')
+  );
+
+  if (!hasStrategic) {
+    candidates = candidates.map((c) => {
+      if (c.provider === 'deepseek') {
+        return {
+          ...c,
+          model: 'default',
+          temperature: 0.3,
+          reason: 'strategic:failsafe-global'
+        };
+      }
+
+      if (c.provider === 'mistral') {
+        return {
+          ...c,
+          model: 'default',
+          temperature: 0.4,
+          reason: 'strategic:failsafe-secondary'
+        };
+      }
+
+      return c;
+    });
   }
 
   /* ---------------------------- SCORING ------------------------------ */
@@ -196,7 +219,10 @@ export function routeTask(
       ctx?.request?.meta?.complexity ||
       (intent?.entities as any)?.complexity;
 
-    if (isMulticoreEnabled && (complexity === 'high' || complexity === 'deep')) {
+    if (
+      isMulticoreEnabled &&
+      (complexity === 'high' || complexity === 'deep')
+    ) {
       parallel = true;
     }
   } catch {
@@ -207,7 +233,7 @@ export function routeTask(
 
   return {
     taskId: task.id,
-    candidates: scored.map((s) => s.c), // ordered best → worst
+    candidates: scored.map((s) => s.c),
     selected,
     parallel
   };
