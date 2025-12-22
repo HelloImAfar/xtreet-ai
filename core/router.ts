@@ -23,30 +23,25 @@ export type ScoringStrategy = (
 /**
  * XTREET GEN 1 SCORING PRINCIPLE
  *
- * 1. Strategic quality defines the tier (cannot be overridden)
- * 2. Cost / latency / size adjust ranking WITHIN the same tier
+ * 1. Strategic quality DEFINES the tier (hard rule)
+ * 2. Cost / latency ONLY order models inside the same tier
  * 3. Lower score is better
  */
 export const defaultScoring: ScoringStrategy = (candidate, task) => {
-  /* ------------------------- STRATEGIC QUALITY ------------------------ */
-  // Strong advantage for strategically selected models
-  let qualityBias = 1000;
-
-  if (candidate.reason?.startsWith('strategic:')) {
-    qualityBias = 0; // primary strategic model
-  }
-
-  /* --------------------------- PRACTICAL FACTORS ---------------------- */
-  const cost = candidate.costEstimate ?? 1;
-  const latency = candidate.latencyEstimateMs ?? 200;
-
   const words = task.text.split(/\s+/).filter(Boolean).length;
   const estTokens = Math.max(1, Math.round(words / 4));
 
-  const practicalScore =
-    cost * estTokens + latency / 100;
+  const cost = candidate.costEstimate ?? 1;
+  const latency = candidate.latencyEstimateMs ?? 200;
 
-  return qualityBias + practicalScore;
+  const practicalScore = cost * estTokens + latency / 100;
+
+  // 🚨 HARD STRATEGIC GATE
+  if (!candidate.reason?.startsWith('strategic:')) {
+    return 5_000 + practicalScore;
+  }
+
+  return practicalScore;
 };
 
 export interface RouterOptions {
@@ -58,7 +53,12 @@ export interface RouterOptions {
 /*                          CANDIDATE CONSTRUCTION                             */
 /* -------------------------------------------------------------------------- */
 
-function buildCandidates(maxCandidates = 3): ModelCandidate[] {
+/**
+ * Build base candidates.
+ * ⚠️ Router NEVER selects physical models.
+ * Uses logical aliases only.
+ */
+function buildCandidates(maxCandidates = 4): ModelCandidate[] {
   const providers = getProvidersOrdered();
   const out: ModelCandidate[] = [];
 
@@ -69,7 +69,7 @@ function buildCandidates(maxCandidates = 3): ModelCandidate[] {
 
     out.push({
       provider: p.name,
-      model: meta.defaultModel || `${p.name}-default`,
+      model: 'default', // 👈 CRITICAL: logical alias only
       temperature: meta.defaultTemperature,
       costEstimate: meta.costPer1k || meta.costEstimate,
       latencyEstimateMs: meta.latencyMs,
@@ -87,10 +87,10 @@ function buildCandidates(maxCandidates = 3): ModelCandidate[] {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Route a single task to providers.
- * - NO provider calls
+ * Route a single task.
  * - Deterministic
- * - Quality-first with practical constraints
+ * - Quality-first
+ * - Strategy cannot be overridden by cost
  */
 export function routeTask(
   task: DecomposedTask,
@@ -107,10 +107,7 @@ export function routeTask(
   let candidates = buildCandidates(maxCandidates);
 
   /* ------------------- STRATEGIC MODEL SELECTION --------------------- */
-  /**
-   * Defines QUALITY ORDER.
-   * This must NEVER be overridden by cost/latency alone.
-   */
+
   try {
     if (intent?.category) {
       const strategy = selectStrategicModel(
@@ -119,16 +116,32 @@ export function routeTask(
         (intent.entities as any)?.complexity ?? 'medium'
       );
 
-      candidates = candidates.map((c) =>
-        c.provider === strategy.primary.provider
-          ? {
-              ...c,
-              model: strategy.primary.model,
-              temperature: strategy.primary.temperature,
-              reason: `strategic:${strategy.reason}`
-            }
-          : c
-      );
+      const strategicProviders = [
+        strategy.primary.provider,
+        ...strategy.fallbacks.map((f) => f.provider)
+      ];
+
+      candidates = candidates.map((c) => {
+        if (!strategicProviders.includes(c.provider)) return c;
+
+        if (c.provider === strategy.primary.provider) {
+          return {
+            ...c,
+            model: strategy.primary.model,
+            temperature: strategy.primary.temperature,
+            reason: `strategic:${strategy.reason}`
+          };
+        }
+
+        const fb = strategy.fallbacks.find((f) => f.provider === c.provider);
+
+        return {
+          ...c,
+          model: fb?.model ?? c.model,
+          temperature: strategy.primary.temperature,
+          reason: `strategic:${strategy.reason}`
+        };
+      });
     }
   } catch {
     // Strategy failure must NEVER break routing
@@ -148,9 +161,11 @@ export function routeTask(
   /* --------------------------- PARALLEL ------------------------------ */
 
   let parallel = false;
+
   try {
     const features = cfg.features;
     const isMulticoreEnabled = Boolean(features?.multicore);
+
     const complexity =
       ctx?.request?.meta?.complexity ||
       (intent?.entities as any)?.complexity;
@@ -164,14 +179,12 @@ export function routeTask(
 
   /* ----------------------- FINAL DECISION ---------------------------- */
 
-  const decision: RoutingDecision = {
+  return {
     taskId: task.id,
-    candidates: scored.map((s) => s.c), // ordered from best → worst
+    candidates: scored.map((s) => s.c), // ordered best → worst
     selected,
     parallel
   };
-
-  return decision;
 }
 
 export default { routeTask, defaultScoring };
