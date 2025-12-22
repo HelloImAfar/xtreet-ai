@@ -1,24 +1,16 @@
 /**
  * core/strategicModelSelector.ts
  *
- * GEN 1 — FINAL, QUALITY-CORRECT VERSION
- *
- * - Quality-first, reality-based ordering
- * - Deterministic, testable, clean
- * - No provider imports, no side effects
+ * GEN 1 — FINAL COHERENT VERSION
  */
 
 import type { Category } from '../types';
-
-/* -------------------------------------------------------------------------- */
-/*                                   TYPES                                    */
-/* -------------------------------------------------------------------------- */
 
 export type TaskComplexity = 'low' | 'medium' | 'high';
 
 export interface ModelChoice {
   provider: string;
-  model: string;
+  model: 'default' | 'fast' | 'strong' | 'code' | 'math';
   temperature: number;
 }
 
@@ -28,160 +20,150 @@ export interface ModelExecutionPlan {
   reason: string;
 }
 
-/* -------------------------------------------------------------------------- */
-/*                             CATEGORY STRATEGY                              */
-/* -------------------------------------------------------------------------- */
-
 const CATEGORY_STRATEGY: Record<
-  Category | 'fast',
+  Category | 'fast' | 'current' | 'efficiency',
   {
-    orderedModels: Array<{ provider: string; model: string }>;
+    orderedModels: Array<{ provider: string; model: ModelChoice['model'] }>;
     baseTemp: number;
     rationale: string;
   }
 > = {
-  /* ----------------------------- CREATIVE ----------------------------- */
   creative: {
     orderedModels: [
-      { provider: 'claude', model: 'claude-3-opus' },
-      { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'gemini', model: 'gemini-default' },
-      { provider: 'mistral', model: 'mistral-large' }
+      { provider: 'claude', model: 'strong' },
+      { provider: 'openai', model: 'strong' },
+      { provider: 'gemini', model: 'strong' },
+      { provider: 'mistral', model: 'default' }
     ],
     baseTemp: 0.7,
-    rationale: 'Deep creativity, symbolism, narrative coherence.'
+    rationale: 'Deep creativity and narrative coherence.'
   },
 
-  /* ----------------------------- EMOTIONAL ----------------------------- */
   emotional: {
     orderedModels: [
-      { provider: 'claude', model: 'claude-3-opus' },
-      { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'gemini', model: 'gemini-default' }
+      { provider: 'claude', model: 'strong' },
+      { provider: 'openai', model: 'strong' },
+      { provider: 'gemini', model: 'default' }
     ],
     baseTemp: 0.6,
-    rationale: 'Empathy, emotional depth, human nuance.'
+    rationale: 'Emotional nuance and empathy.'
   },
 
-  /* -------------------------------- CODE ------------------------------- */
   code: {
     orderedModels: [
-      { provider: 'deepseek', model: 'deepseek-coder' },
-      { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'qwen', model: 'qwen-max' },
-      { provider: 'grok', model: 'grok-default' }
+      { provider: 'deepseek', model: 'code' },
+      { provider: 'openai', model: 'strong' },
+      { provider: 'qwen', model: 'code' }
     ],
     baseTemp: 0.05,
-    rationale: 'Correctness, reasoning, architecture over speed.'
+    rationale: 'Correctness and architectural reasoning.'
   },
 
-  /* -------------------------------- MATH ------------------------------- */
   math: {
     orderedModels: [
-      { provider: 'deepseek', model: 'deepseek-math' },
-      { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'grok', model: 'grok-default' }
+      { provider: 'deepseek', model: 'math' },
+      { provider: 'openai', model: 'strong' }
     ],
     baseTemp: 0.0,
     rationale: 'Deterministic mathematical reasoning.'
   },
 
-  /* ------------------------------- VISION ------------------------------ */
   vision: {
     orderedModels: [
-      { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'gemini', model: 'gemini-default' },
-      { provider: 'mistral', model: 'mistral-large' }
+      { provider: 'openai', model: 'strong' },
+      { provider: 'gemini', model: 'strong' }
     ],
     baseTemp: 0.2,
-    rationale: 'Multimodal perception and image understanding.'
+    rationale: 'Multimodal perception.'
   },
 
-  /* ------------------------------ BRANDING ----------------------------- */
   branding: {
     orderedModels: [
-      { provider: 'claude', model: 'claude-3-opus' },
-      { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'gemini', model: 'gemini-default' },
-      { provider: 'mistral', model: 'mistral-large' }
+      { provider: 'claude', model: 'strong' },
+      { provider: 'openai', model: 'strong' },
+      { provider: 'gemini', model: 'default' }
     ],
     baseTemp: 0.55,
-    rationale: 'Brand voice consistency, identity, controlled expression.'
+    rationale: 'Brand identity and controlled expression.'
   },
 
-  /* ----------------------------- EFFICIENCY ---------------------------- */
-  efficiency: {
-    orderedModels: [
-      { provider: 'openai', model: 'gpt-4o-mini' },
-      { provider: 'qwen', model: 'qwen-max' },
-      { provider: 'grok', model: 'grok-default' },
-      { provider: 'gemini', model: 'gemini-default' }
-    ],
-    baseTemp: 0.15,
-    rationale: 'Speed/cost tradeoff with acceptable quality.'
-  },
-
-  /* ---------------------------- INFORMATIVE ---------------------------- */
   informative: {
     orderedModels: [
-      { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'claude', model: 'claude-3-sonnet' },
-      { provider: 'gemini', model: 'gemini-default' }
+      { provider: 'openai', model: 'strong' },
+      { provider: 'claude', model: 'default' },
+      { provider: 'gemini', model: 'default' }
     ],
     baseTemp: 0.25,
-    rationale: 'Clarity, structure, factual accuracy.'
+    rationale: 'Clarity and factual accuracy.'
   },
 
-  /* ------------------------------- OTHER ------------------------------- */
   other: {
     orderedModels: [
-      { provider: 'openai', model: 'gpt-4o-mini' },
-      { provider: 'gemini', model: 'gemini-default' },
-      { provider: 'grok', model: 'grok-default' }
+      { provider: 'openai', model: 'fast' },
+      { provider: 'gemini', model: 'default' }
     ],
     baseTemp: 0.3,
-    rationale: 'Safe general-purpose fallback.'
+    rationale: 'Safe fallback.'
   },
 
-  /* ------------------------------ CURRENT ------------------------------ */
-  current: {
-    orderedModels: [
-      { provider: 'openai', model: 'gpt-4o' },
-      { provider: 'gemini', model: 'gemini-default' }
-    ],
-    baseTemp: 0.3,
-    rationale: 'Most reliable up-to-date general intelligence.'
-  },
-
-  /* ------------------------------- FAST -------------------------------- */
   fast: {
     orderedModels: [
-      { provider: 'llama', model: 'llama-fast' },
-      { provider: 'grok', model: 'grok-default' },
-      { provider: 'openai', model: 'gpt-4o-mini' }
+      { provider: 'llama', model: 'fast' },
+      { provider: 'openai', model: 'fast' }
     ],
     baseTemp: 0.2,
-    rationale: 'Ultra-low latency responses where quality ceiling is acceptable.'
+    rationale: 'Ultra-low latency trivial queries.'
+  },
+
+  current: {
+    orderedModels: [
+      { provider: 'openai', model: 'strong' },
+      { provider: 'claude', model: 'default' }
+    ],
+    baseTemp: 0.3,
+    rationale: 'Current events awareness.'
+  },
+
+  efficiency: {
+    orderedModels: [
+      { provider: 'openai', model: 'fast' },
+      { provider: 'gemini', model: 'fast' }
+    ],
+    baseTemp: 0.15,
+    rationale: 'Cost / speed optimized.'
   }
 };
-
-/* -------------------------------------------------------------------------- */
-/*                                   UTILS                                    */
-/* -------------------------------------------------------------------------- */
 
 function clamp(x: number, min = 0, max = 1) {
   return Math.max(min, Math.min(max, x));
 }
 
-/* -------------------------------------------------------------------------- */
-/*                         STRATEGIC MODEL SELECTOR                            */
-/* -------------------------------------------------------------------------- */
-
 export function selectStrategicModel(
-  category: Category | 'fast',
+  category: Category | 'fast' | 'current' | 'efficiency',
   intentConfidence?: number,
   taskComplexity: TaskComplexity = 'medium'
 ): ModelExecutionPlan {
+  let downgraded: string | null = null;
+
+  if (
+    category === 'fast' &&
+    (taskComplexity !== 'low' ||
+      typeof intentConfidence !== 'number' ||
+      intentConfidence < 0.9)
+  ) {
+    category = 'other';
+    downgraded = 'FAST → OTHER';
+  }
+
+  if (
+    (category === 'current' || category === 'efficiency') &&
+    typeof intentConfidence === 'number' &&
+    intentConfidence < 0.7
+  ) {
+    category = 'other';
+    downgraded = 'CATEGORY → OTHER';
+  }
+
   const strategy = CATEGORY_STRATEGY[category] ?? CATEGORY_STRATEGY.other;
 
   let temperature = clamp(strategy.baseTemp);
@@ -207,7 +189,10 @@ export function selectStrategicModel(
       intentConfidence !== undefined
         ? `IntentConfidence: ${intentConfidence}`
         : 'IntentConfidence: n/a',
+      downgraded ? `Downgrade: ${downgraded}` : null,
       strategy.rationale
-    ].join(' | ')
+    ]
+      .filter(Boolean)
+      .join(' | ')
   };
 }

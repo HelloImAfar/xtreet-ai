@@ -3,24 +3,43 @@ import { timeoutPromise } from '../../../lib/utils';
 import { BaseModelProvider, ExecuteConfig, ExecuteResult } from '../provider';
 import { callGemini } from './geminiClient';
 
+function resolveGeminiModel(alias?: string): string {
+  switch (alias) {
+    case 'fast':
+      return process.env.GEMINI_MODEL_FAST!;
+    case 'strong':
+      return process.env.GEMINI_MODEL_STRONG!;
+    case 'default':
+    default:
+      return process.env.GEMINI_MODEL_DEFAULT!;
+  }
+}
+
 export class GeminiProvider extends BaseModelProvider {
   id = 'gemini';
 
-  constructor() {
-    super();
-  }
-
-  protected async _execute(prompt: string, config: ExecuteConfig): Promise<Partial<ExecuteResult>> {
-    const model = config.model || process.env.GEMINI_MODEL || 'gemini-default';
-    const maxTokens = config.maxTokens || 512;
-    const temperature = typeof config.temperature === 'number' ? config.temperature : 0.7;
-    const timeoutMs = typeof config.timeoutMs === 'number' ? config.timeoutMs : 15_000;
-
-    const payload = { prompt, model, maxTokens, temperature } as any;
+  protected async _execute(
+    prompt: string,
+    config: ExecuteConfig
+  ): Promise<Partial<ExecuteResult>> {
+    const model = resolveGeminiModel(config.model);
+    const maxTokens = config.maxTokens ?? 512;
+    const temperature =
+      typeof config.temperature === 'number' ? config.temperature : 0.7;
+    const timeoutMs = config.timeoutMs ?? 15_000;
 
     try {
-      const resp = await timeoutPromise(callGemini(payload), timeoutMs, () => logger.warn('Gemini request timed out'));
-      return { text: resp.text ?? '', tokensUsed: resp.tokensUsed, meta: resp.meta } as Partial<ExecuteResult>;
+      const resp = await timeoutPromise(
+        callGemini({ prompt, model, maxTokens, temperature } as any),
+        timeoutMs,
+        () => logger.warn('Gemini request timed out')
+      );
+
+      return {
+        text: resp.text ?? '',
+        tokensUsed: resp.tokensUsed,
+        meta: resp.meta
+      };
     } catch (err: any) {
       logger.warn('Gemini provider error', { error: String(err) });
       throw new Error(`Gemini provider error: ${String(err)}`);
