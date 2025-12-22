@@ -55,7 +55,7 @@ export interface RouterOptions {
 
 /**
  * Build base candidates.
- * Router NEVER selects physical models.
+ * ⚠️ Router NEVER selects physical models.
  * Uses logical aliases only.
  */
 function buildCandidates(maxCandidates = 4): ModelCandidate[] {
@@ -69,7 +69,7 @@ function buildCandidates(maxCandidates = 4): ModelCandidate[] {
 
     out.push({
       provider: p.name,
-      model: 'default',
+      model: 'default', // 👈 CRITICAL: logical alias only
       temperature: meta.defaultTemperature,
       costEstimate: meta.costPer1k || meta.costEstimate,
       latencyEstimateMs: meta.latencyMs,
@@ -90,7 +90,7 @@ function buildCandidates(maxCandidates = 4): ModelCandidate[] {
  * Route a single task.
  * - Deterministic
  * - Quality-first
- * - FAST is a MODE, not semantic intent
+ * - Strategy cannot be overridden by cost
  */
 export function routeTask(
   task: DecomposedTask,
@@ -106,28 +106,14 @@ export function routeTask(
 
   let candidates = buildCandidates(maxCandidates);
 
-  /* ----------------------- FAST MODE HEURISTIC ----------------------- */
-  const wordCount = task.text.split(/\s+/).filter(Boolean).length;
-
-  if (wordCount <= 2) {
-    intent = {
-      ...(intent ?? {}),
-      category: 'fast',
-      confidence: 1,
-      intent: (intent?.intent ?? '')
-    };
-  }
-
   /* ------------------- STRATEGIC MODEL SELECTION --------------------- */
 
   try {
     if (intent?.category) {
-      const isFast = intent.category === 'fast';
-
       const strategy = selectStrategicModel(
         intent.category,
         intent.confidence,
-        isFast ? 'low' : ((intent.entities as any)?.complexity ?? 'medium')
+        (intent.entities as any)?.complexity ?? 'medium'
       );
 
       const strategicProviders = [
@@ -195,7 +181,7 @@ export function routeTask(
 
   return {
     taskId: task.id,
-    candidates: scored.map((s) => s.c),
+    candidates: scored.map((s) => s.c), // ordered best → worst
     selected,
     parallel
   };

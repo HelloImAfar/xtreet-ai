@@ -10,23 +10,27 @@ export type IntentRule = (
 /** Default rule set (heuristic-based). Replaceable via options. */
 const defaultRules: IntentRule[] = [
   /* ------------------------------------------------------------------ */
-  /* FAST — ultra simple, low-risk, low-complexity queries               */
+  /* FAST — ultra simple conversational glue                             */
   /* ------------------------------------------------------------------ */
   (text) => {
     const t = text.toLowerCase().trim();
     const words = t.split(/\s+/).filter(Boolean).length;
 
-    // Hard exclusions — fast must NEVER steal these
+    // Hard exclusions — fast must NEVER steal knowledge tasks
     if (
-      /\b(write|create|story|poem|code|debug|fix|why|explain|analyze|design|brand|feel|sad|anxious|math|solve|calculate)\b/.test(t)
+      /\b(write|create|story|poem|code|debug|fix|why|explain|analyze|design|brand|feel|sad|anxious|math|solve|calculate|what|who|where|when|how)\b/.test(
+        t
+      )
     ) {
       return null;
     }
 
-    // Positive fast signals
+    // Positive fast signals (pure glue)
     if (
-      words <= 12 &&
-      /^(ok|okay|yes|no|sure|thanks|thank you|what now|next|continue|go on|summary|tl;dr|quick|short answer)/i.test(t)
+      words <= 2 &&
+      /^(hi|hello|hey|yo|ok|okay|yes|no|sure|thanks|thank you|next|continue|go on)$/i.test(
+        t
+      )
     ) {
       return {
         intent: 'fast_response',
@@ -44,7 +48,11 @@ const defaultRules: IntentRule[] = [
   (text) => {
     const t = text.toLowerCase();
     if (/\b(error|exception|compile|stack trace|fix my|debug)\b/.test(t)) {
-      return { intent: 'code_debug', category: 'code' as Category, confidence: 0.95 };
+      return {
+        intent: 'code_debug',
+        category: 'code' as Category,
+        confidence: 0.95
+      };
     }
     return null;
   },
@@ -55,7 +63,11 @@ const defaultRules: IntentRule[] = [
   (text) => {
     const t = text.toLowerCase();
     if (/\b(poem|story|write a song|creative|compose|lyrics|slogan)\b/.test(t)) {
-      return { intent: 'creative_writing', category: 'creative' as Category, confidence: 0.92 };
+      return {
+        intent: 'creative_writing',
+        category: 'creative' as Category,
+        confidence: 0.92
+      };
     }
     return null;
   },
@@ -66,7 +78,11 @@ const defaultRules: IntentRule[] = [
   (text) => {
     const t = text.toLowerCase();
     if (/\b(feel|sad|anxious|depressed|i am|help me)\b/.test(t)) {
-      return { intent: 'emotional_support', category: 'emotional' as Category, confidence: 0.9 };
+      return {
+        intent: 'emotional_support',
+        category: 'emotional' as Category,
+        confidence: 0.9
+      };
     }
     return null;
   },
@@ -77,7 +93,11 @@ const defaultRules: IntentRule[] = [
   (text) => {
     const t = text.toLowerCase();
     if (/\b(integral|derivative|solve|calculate|equation|prove|theorem)\b/.test(t)) {
-      return { intent: 'math', category: 'math' as Category, confidence: 0.9 };
+      return {
+        intent: 'math',
+        category: 'math' as Category,
+        confidence: 0.9
+      };
     }
     return null;
   },
@@ -88,7 +108,11 @@ const defaultRules: IntentRule[] = [
   (text) => {
     const t = text.toLowerCase();
     if (/\b(image|photo|describe image|vision|analyze image)\b/.test(t)) {
-      return { intent: 'vision', category: 'vision' as Category, confidence: 0.9 };
+      return {
+        intent: 'vision',
+        category: 'vision' as Category,
+        confidence: 0.9
+      };
     }
     return null;
   },
@@ -99,7 +123,11 @@ const defaultRules: IntentRule[] = [
   (text) => {
     const t = text.toLowerCase();
     if (/\b(what is|who is|explain|tell me about|information|define)\b/.test(t)) {
-      return { intent: 'informative', category: 'informative' as Category, confidence: 0.8 };
+      return {
+        intent: 'informative',
+        category: 'informative' as Category,
+        confidence: 0.8
+      };
     }
     return null;
   },
@@ -110,7 +138,11 @@ const defaultRules: IntentRule[] = [
   (text) => {
     const t = text.toLowerCase();
     if (/\b(compare|contrast|pros and cons|analyze|synthesize|summarize)\b/.test(t)) {
-      return { intent: 'synthesis', category: 'other' as Category, confidence: 0.85 };
+      return {
+        intent: 'synthesis',
+        category: 'other' as Category,
+        confidence: 0.85
+      };
     }
     return null;
   }
@@ -119,8 +151,10 @@ const defaultRules: IntentRule[] = [
 function detectDepth(text: string) {
   const sentences = text.split(/[.!?]+/).map((s) => s.trim()).filter(Boolean);
   const words = text.split(/\s+/).filter(Boolean).length;
-  if (words > 200 || sentences.length >= 4) return { depth: 'deep', complexity: 'high' };
-  if (words > 60 || sentences.length >= 2) return { depth: 'medium', complexity: 'medium' };
+  if (words > 200 || sentences.length >= 4)
+    return { depth: 'deep', complexity: 'high' };
+  if (words > 60 || sentences.length >= 2)
+    return { depth: 'medium', complexity: 'medium' };
   return { depth: 'shallow', complexity: 'low' };
 }
 
@@ -128,15 +162,11 @@ function detectRisk(text: string) {
   const t = text.toLowerCase();
   const high = /\b(bomb|assassinate|kill|illegal|hack into|exploit|poison)\b/;
   const medium = /\b(hate|discriminate|fraud|steal|phish)\b/;
-  if (high.test(t)) return { severity: 'high' as const, reasons: ['potentially violent or illegal'] };
-  if (medium.test(t)) return { severity: 'medium' as const, reasons: ['potentially abusive or fraudulent'] };
+  if (high.test(t)) return { severity: 'high' as const };
+  if (medium.test(t)) return { severity: 'medium' as const };
   return { severity: 'low' as const };
 }
 
-/**
- * Analyze a RExRequest and produce an IntentProfile.
- * Logic is purely heuristic and replaceable via `rules` option.
- */
 export async function analyzeIntent(
   req: RExRequest,
   opts?: { rules?: IntentRule[]; ctx?: PipelineContext }
@@ -152,18 +182,15 @@ export async function analyzeIntent(
         const risk = detectRisk(text);
         return {
           intent: res.intent ?? 'unknown',
-          category: (res.category as Category) ?? ('other' as Category),
+          category: res.category as Category,
           confidence: res.confidence ?? 0.75,
           risk,
           entities: { depth: depth.depth, complexity: depth.complexity }
         };
       }
-    } catch {
-      // ignore rule errors
-    }
+    } catch {}
   }
 
-  // Fallback: async classifier
   const cat = await simpleCategoryClassifier(text);
   const depth = detectDepth(text);
   const risk = detectRisk(text);

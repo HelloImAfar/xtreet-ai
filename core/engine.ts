@@ -47,7 +47,10 @@ const cache = new LRU<string, any>({
 /*                                RATE LIMIT                                  */
 /* -------------------------------------------------------------------------- */
 
-const rateLimitBuckets = new Map<string, { tokens: number; lastRefill: number }>();
+const rateLimitBuckets = new Map<
+  string,
+  { tokens: number; lastRefill: number }
+>();
 
 const RATE_LIMIT_MAX_TOKENS = 10;
 const RATE_LIMIT_REFILL_MS = 60_000;
@@ -102,7 +105,7 @@ const providerFactories: Record<string, () => ProviderInstance> = {
 };
 
 /* -------------------------------------------------------------------------- */
-/*                                 RESULT                                     */
+/*                                   RESULT                                    */
 /* -------------------------------------------------------------------------- */
 
 export interface EngineResult {
@@ -289,10 +292,9 @@ export async function handleMessage(
 
     /* --------------------------------- STYLE -------------------------------- */
     const styled =
-      (await (await import('./styleWrapper')).styleWrapper(
-        mergedText,
-        { xtreetTone: true }
-      )) ?? mergedText;
+      (await (await import('./styleWrapper')).styleWrapper(mergedText, {
+        xtreetTone: true
+      })) ?? mergedText;
 
     /* ---------------------------------- COST -------------------------------- */
     const costReport = costController.getReport();
