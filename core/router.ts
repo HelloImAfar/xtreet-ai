@@ -55,7 +55,7 @@ export interface RouterOptions {
 
 /**
  * Build base candidates.
- * ⚠️ Router NEVER selects physical models.
+ * Router NEVER selects physical models.
  * Uses logical aliases only.
  */
 function buildCandidates(maxCandidates = 4): ModelCandidate[] {
@@ -69,7 +69,7 @@ function buildCandidates(maxCandidates = 4): ModelCandidate[] {
 
     out.push({
       provider: p.name,
-      model: 'default', // logical alias only
+      model: 'default',
       temperature: meta.defaultTemperature,
       costEstimate: meta.costPer1k || meta.costEstimate,
       latencyEstimateMs: meta.latencyMs,
@@ -90,7 +90,7 @@ function buildCandidates(maxCandidates = 4): ModelCandidate[] {
  * Route a single task.
  * - Deterministic
  * - Quality-first
- * - FAST is a MODE, not an intent
+ * - FAST is a MODE, not semantic intent
  */
 export function routeTask(
   task: DecomposedTask,
@@ -107,15 +107,6 @@ export function routeTask(
   let candidates = buildCandidates(maxCandidates);
 
   /* ----------------------- FAST MODE HEURISTIC ----------------------- */
-  /**
-   * Ultra-trivial inputs go to FAST lane.
-   * No intent analysis required.
-   *
-   * Examples:
-   *  - "hi"
-   *  - "ok"
-   *  - "thanks"
-   */
   const wordCount = task.text.split(/\s+/).filter(Boolean).length;
 
   if (wordCount <= 2) {
@@ -123,7 +114,7 @@ export function routeTask(
       ...(intent ?? {}),
       category: 'fast',
       confidence: 1,
-      intent: intent?.intent ?? ''
+      intent: (intent?.intent ?? '')
     };
   }
 
@@ -131,10 +122,12 @@ export function routeTask(
 
   try {
     if (intent?.category) {
+      const isFast = intent.category === 'fast';
+
       const strategy = selectStrategicModel(
         intent.category,
         intent.confidence,
-        (intent.entities as any)?.complexity ?? 'low'
+        isFast ? 'low' : ((intent.entities as any)?.complexity ?? 'medium')
       );
 
       const strategicProviders = [
@@ -202,7 +195,7 @@ export function routeTask(
 
   return {
     taskId: task.id,
-    candidates: scored.map((s) => s.c), // ordered best → worst
+    candidates: scored.map((s) => s.c),
     selected,
     parallel
   };

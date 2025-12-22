@@ -2,6 +2,7 @@
  * core/strategicModelSelector.ts
  *
  * GEN 1 — FINAL COHERENT VERSION
+ * FAST-safe, router-aligned
  */
 
 import type { Category } from '../types';
