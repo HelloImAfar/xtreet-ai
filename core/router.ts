@@ -69,7 +69,7 @@ function buildCandidates(maxCandidates = 4): ModelCandidate[] {
 
     out.push({
       provider: p.name,
-      model: 'default', // 👈 CRITICAL: logical alias only
+      model: 'default', // logical alias only
       temperature: meta.defaultTemperature,
       costEstimate: meta.costPer1k || meta.costEstimate,
       latencyEstimateMs: meta.latencyMs,
@@ -90,7 +90,7 @@ function buildCandidates(maxCandidates = 4): ModelCandidate[] {
  * Route a single task.
  * - Deterministic
  * - Quality-first
- * - Strategy cannot be overridden by cost
+ * - FAST is a HARD override (never scored)
  */
 export function routeTask(
   task: DecomposedTask,
@@ -101,6 +101,32 @@ export function routeTask(
   const cfg = getConfig();
   const scoring = opts.scoring ?? defaultScoring;
   const maxCandidates = opts.maxCandidates ?? 4;
+
+  /* ------------------------------------------------------------------ */
+  /* 🚀 FAST — HARD OVERRIDE (NO SCORING, NO COMPETITION)                 */
+  /* ------------------------------------------------------------------ */
+
+  if (
+    intent?.category === 'fast' &&
+    intent.confidence >= 0.9 &&
+    (intent.entities as any)?.complexity === 'low'
+  ) {
+    const strategy = selectStrategicModel('fast', 1, 'low');
+
+    const selected: ModelCandidate = {
+      provider: strategy.primary.provider,
+      model: strategy.primary.model,
+      temperature: strategy.primary.temperature,
+      reason: `strategic:${strategy.reason}`
+    };
+
+    return {
+      taskId: task.id,
+      candidates: [selected],
+      selected,
+      parallel: false
+    };
+  }
 
   /* ------------------------- BASE CANDIDATES ------------------------- */
 
