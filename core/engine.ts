@@ -209,37 +209,43 @@ export async function handleMessage(
 
     /* ------------------------------- PROVIDERS ------------------------------ */
     const requestId = `${req.userId}:${Date.now()}`;
-    const costController = new CostController({
-      userId: req.userId,
-      requestId
-    });
+    const costController = new CostController({ userId: req.userId, requestId });
 
     const providerCache: Record<string, ProviderInstance> = {};
-
-    const getProvider = (name: string): ProviderInstance => {
-      if (!providerCache[name]) {
-        providerCache[name] =
-          providerFactories[name]?.() ?? new MockProvider();
-      }
-      return providerCache[name];
-    };
+    const getProvider = (name: string): ProviderInstance =>
+      providerCache[name] ??= providerFactories[name]?.() ?? new MockProvider();
 
     for (const task of tasks) {
       const decision = ctx.routing?.[task.id];
-      if (!decision) {
+      if (!decision?.selected) {
         errors.push(`routing_missing:${task.id}`);
         continue;
       }
 
-      const providers = decision.candidates
-        .map((c) => getProvider(c.provider))
-        .filter(Boolean);
+      /* 🔑 STRICT EXECUTION ORDER */
+      const orderedProviders: ProviderInstance[] = [];
+
+      // 1️⃣ Selected model
+      orderedProviders.push(getProvider(decision.selected.provider));
+
+      // 2️⃣ Strategic fallbacks
+      for (const c of decision.candidates) {
+        if (c.provider !== decision.selected.provider) {
+          orderedProviders.push(getProvider(c.provider));
+        }
+      }
+
+      // 3️⃣ Global failsafe
+      orderedProviders.push(getProvider('deepseek'));
+
+      // 4️⃣ Absolute fallback
+      orderedProviders.push(new MockProvider());
 
       const out = await executeWithFailover(
-        providers.length ? providers : [new MockProvider()],
+        orderedProviders,
         task.text,
         {
-          model: decision.selected?.model,
+          model: decision.selected.model,
           maxTokens: 512
         }
       );
@@ -251,7 +257,7 @@ export async function handleMessage(
 
       costController.addUsage({
         provider: out.providerId ?? 'unknown',
-        model: decision.selected?.model ?? 'unknown',
+        model: decision.selected.model,
         tokensOutput: out.result.tokensUsed ?? 0
       });
 
@@ -259,7 +265,7 @@ export async function handleMessage(
         {
           taskId: task.id,
           provider: out.providerId ?? 'unknown',
-          model: decision.selected?.model ?? 'unknown',
+          model: decision.selected.model,
           text: out.result.text,
           status: 'fulfilled',
           tokensUsed: out.result.tokensUsed
@@ -273,14 +279,14 @@ export async function handleMessage(
     /* -------------------------------- ASSEMBLE ------------------------------ */
     const modelPlan: string[] = [];
     const assembleInput: Array<{
-      status: 'fulfilled' | 'rejected';
-      value?: { text: string };
+      status: 'fulfilled';
+      value: { text: string };
     }> = [];
 
     for (const task of tasks) {
       const r = ctx.agentResults?.[task.id]?.[0];
       if (r?.text) {
-        modelPlan.push(r.model);
+        modelPlan.push(`${r.provider}:${r.model}`);
         assembleInput.push({
           status: 'fulfilled',
           value: { text: r.text }
@@ -326,7 +332,4 @@ export async function handleMessage(
   }
 }
 
-export default {
-  handleMessage,
-  checkRateLimit
-};
+export default { handleMessage, checkRateLimit };
