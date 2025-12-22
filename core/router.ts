@@ -69,7 +69,7 @@ function buildCandidates(maxCandidates = 4): ModelCandidate[] {
 
     out.push({
       provider: p.name,
-      model: 'default', // 👈 logical alias only
+      model: 'default', // logical alias only
       temperature: meta.defaultTemperature,
       costEstimate: meta.costPer1k || meta.costEstimate,
       latencyEstimateMs: meta.latencyMs,
@@ -90,7 +90,7 @@ function buildCandidates(maxCandidates = 4): ModelCandidate[] {
  * Route a single task.
  * - Deterministic
  * - Quality-first
- * - Strategy cannot be overridden by cost
+ * - FAST is a MODE, not an intent
  */
 export function routeTask(
   task: DecomposedTask,
@@ -106,10 +106,10 @@ export function routeTask(
 
   let candidates = buildCandidates(maxCandidates);
 
-  /* ----------------------- FAST HEURISTIC (GEN 1) -------------------- */
+  /* ----------------------- FAST MODE HEURISTIC ----------------------- */
   /**
-   * Ultra-short, trivial inputs with high confidence
-   * are force-routed to FAST lane.
+   * Ultra-trivial inputs go to FAST lane.
+   * No intent analysis required.
    *
    * Examples:
    *  - "hi"
@@ -118,15 +118,12 @@ export function routeTask(
    */
   const wordCount = task.text.split(/\s+/).filter(Boolean).length;
 
-  if (
-    wordCount <= 2 &&
-    intent &&
-    typeof intent.confidence === 'number' &&
-    intent.confidence > 0.8
-  ) {
+  if (wordCount <= 2) {
     intent = {
-      ...intent,
-      category: 'fast'
+      ...(intent ?? {}),
+      category: 'fast',
+      confidence: 1,
+      intent: intent?.intent ?? ''
     };
   }
 
@@ -137,7 +134,7 @@ export function routeTask(
       const strategy = selectStrategicModel(
         intent.category,
         intent.confidence,
-        (intent.entities as any)?.complexity ?? 'medium'
+        (intent.entities as any)?.complexity ?? 'low'
       );
 
       const strategicProviders = [
