@@ -3,7 +3,6 @@ import LRU from 'lru-cache';
 import logger from './logger';
 import { decomposeIfNeeded } from './decomposer';
 import { assemble } from './assembler';
-import { analyzeIntent } from './intentClassifier';
 import { routeTask } from './router';
 import { runAgents } from './agents/agent';
 import LogicalAuditorAgent from './agents/logicalAuditor';
@@ -14,6 +13,9 @@ import { verifyPipeline } from './verifier';
 import { runSecurityChecks } from './security';
 import { getMemory } from './memory';
 import { CostController } from './costController';
+
+/* ✅ LLM INTENT CLASSIFIER */
+import { analyzeIntentWithLLM } from './LLMintentClassifier';
 
 /* ----------------------------- PROVIDERS --------------------------------- */
 import OpenAIProvider from './models/openai/openaiProvider';
@@ -105,7 +107,7 @@ const providerFactories: Record<string, () => ProviderInstance> = {
 };
 
 /* -------------------------------------------------------------------------- */
-/*                                   RESULT                                    */
+/*                                   RESULT                                   */
 /* -------------------------------------------------------------------------- */
 
 export interface EngineResult {
@@ -119,7 +121,7 @@ export interface EngineResult {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                               MAIN HANDLER                                 */
+/*                               MAIN HANDLER                                  */
 /* -------------------------------------------------------------------------- */
 
 export async function handleMessage(
@@ -169,7 +171,7 @@ export async function handleMessage(
     ctx.memorySnapshot = await getMemory(req.userId);
 
     /* ------------------------------- INTENT -------------------------------- */
-    const intent = await analyzeIntent(req);
+    const intent = await analyzeIntentWithLLM(req.text);
     ctx.intent = intent;
 
     /* ------------------------------ DECOMPOSE ------------------------------- */
@@ -209,43 +211,37 @@ export async function handleMessage(
 
     /* ------------------------------- PROVIDERS ------------------------------ */
     const requestId = `${req.userId}:${Date.now()}`;
-    const costController = new CostController({ userId: req.userId, requestId });
+    const costController = new CostController({
+      userId: req.userId,
+      requestId
+    });
 
     const providerCache: Record<string, ProviderInstance> = {};
-    const getProvider = (name: string): ProviderInstance =>
-      providerCache[name] ??= providerFactories[name]?.() ?? new MockProvider();
+
+    const getProvider = (name: string): ProviderInstance => {
+      if (!providerCache[name]) {
+        providerCache[name] =
+          providerFactories[name]?.() ?? new MockProvider();
+      }
+      return providerCache[name];
+    };
 
     for (const task of tasks) {
       const decision = ctx.routing?.[task.id];
-      if (!decision?.selected) {
+      if (!decision) {
         errors.push(`routing_missing:${task.id}`);
         continue;
       }
 
-      /* 🔑 STRICT EXECUTION ORDER */
-      const orderedProviders: ProviderInstance[] = [];
-
-      // 1️⃣ Selected model
-      orderedProviders.push(getProvider(decision.selected.provider));
-
-      // 2️⃣ Strategic fallbacks
-      for (const c of decision.candidates) {
-        if (c.provider !== decision.selected.provider) {
-          orderedProviders.push(getProvider(c.provider));
-        }
-      }
-
-      // 3️⃣ Global failsafe
-      orderedProviders.push(getProvider('deepseek'));
-
-      // 4️⃣ Absolute fallback
-      orderedProviders.push(new MockProvider());
+      const providers = decision.candidates
+        .map((c) => getProvider(c.provider))
+        .filter(Boolean);
 
       const out = await executeWithFailover(
-        orderedProviders,
+        providers.length ? providers : [new MockProvider()],
         task.text,
         {
-          model: decision.selected.model,
+          model: decision.selected?.model,
           maxTokens: 512
         }
       );
@@ -257,7 +253,7 @@ export async function handleMessage(
 
       costController.addUsage({
         provider: out.providerId ?? 'unknown',
-        model: decision.selected.model,
+        model: decision.selected?.model ?? 'unknown',
         tokensOutput: out.result.tokensUsed ?? 0
       });
 
@@ -265,7 +261,7 @@ export async function handleMessage(
         {
           taskId: task.id,
           provider: out.providerId ?? 'unknown',
-          model: decision.selected.model,
+          model: decision.selected?.model ?? 'unknown',
           text: out.result.text,
           status: 'fulfilled',
           tokensUsed: out.result.tokensUsed
@@ -279,14 +275,14 @@ export async function handleMessage(
     /* -------------------------------- ASSEMBLE ------------------------------ */
     const modelPlan: string[] = [];
     const assembleInput: Array<{
-      status: 'fulfilled';
-      value: { text: string };
+      status: 'fulfilled' | 'rejected';
+      value?: { text: string };
     }> = [];
 
     for (const task of tasks) {
       const r = ctx.agentResults?.[task.id]?.[0];
       if (r?.text) {
-        modelPlan.push(`${r.provider}:${r.model}`);
+        modelPlan.push(r.model);
         assembleInput.push({
           status: 'fulfilled',
           value: { text: r.text }
@@ -332,4 +328,7 @@ export async function handleMessage(
   }
 }
 
-export default { handleMessage, checkRateLimit };
+export default {
+  handleMessage,
+  checkRateLimit
+};
