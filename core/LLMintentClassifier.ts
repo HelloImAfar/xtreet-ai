@@ -1,189 +1,170 @@
-import type { IntentProfile } from '@/types/rex';
-import type { Category } from '@/types';
-import type { ModelProvider } from './models/provider';
-import { getProvidersOrdered } from './config';
+/**
+ * core/LLMintentClassifier.ts
+ *
+ * GEN 1 — FINAL (ARCHITECTURE ALIGNED)
+ */
 
-/* Providers */
+import type { Category, IntentProfile } from '../types';
+import { executeWithFailover } from './retry';
+
 import GeminiProvider from './models/gemini/geminiProvider';
 import DeepSeekProvider from './models/deepseek/deepseekProvider';
+import MistralProvider from './models/mistral/mistralProvider';
 
-/* ============================================================
-   LLM Intent Classification (GEN 1 – Production)
-   ============================================================ */
+/* -------------------------------------------------------------------------- */
+/*                                  CONFIG                                    */
+/* -------------------------------------------------------------------------- */
 
-/**
- * Strict JSON schema expected from LLM
- */
-interface LLMIntentOutput {
-  category: Category;
-  confidence: number;
-  entities?: {
-    depth?: 'shallow' | 'medium' | 'deep';
-    complexity?: 'low' | 'medium' | 'high';
-  };
-  risk?: {
-    severity: 'low' | 'medium' | 'high';
-  };
-}
+const ALLOWED_CATEGORIES: Category[] = [
+  'creative',
+  'emotional',
+  'code',
+  'math',
+  'vision',
+  'branding',
+  'informative',
+  'current',
+  'efficiency',
+  'fast',
+  'other'
+];
 
-/* ------------------------------------------------------------------ */
-/* SYSTEM PROMPT                                                      */
-/* ------------------------------------------------------------------ */
+const PROVIDERS = [
+  new GeminiProvider(),   // cheap / default (free tier aware)
+  new DeepSeekProvider(), // reasoning backup
+  new MistralProvider()   // last fallback
+];
 
-const SYSTEM_PROMPT = `You are a strict intent classifier.
+/* -------------------------------------------------------------------------- */
+/*                                   PROMPT                                   */
+/* -------------------------------------------------------------------------- */
 
-Your ONLY task is to analyze user input and return ONLY a valid JSON object.
-Do NOT add explanations, markdown, comments, or extra text.
+function buildPrompt(text: string): string {
+  return `
+You are an intent classification engine.
 
-Return ONLY this exact JSON structure:
+Rules:
+- Respond ONLY with valid JSON
+- No markdown
+- No explanations
+- No trailing text
 
+Allowed categories:
+${ALLOWED_CATEGORIES.join(', ')}
+
+JSON format:
 {
-  "category": "<one of: fast, code, creative, informative, emotional, math, vision, branding, efficiency, current, other>",
-  "confidence": <number between 0.0 and 1.0>,
+  "category": "<category>",
+  "confidence": number between 0 and 1,
   "entities": {
-    "depth": "<shallow | medium | deep>",
-    "complexity": "<low | medium | high>"
-  },
-  "risk": {
-    "severity": "<low | medium | high>"
+    "complexity": "low" | "medium" | "high"
   }
 }
 
-Classification rules:
-- fast: greetings, acknowledgements, glue messages
-- code: programming, debugging, technical issues
-- creative: writing, storytelling, artistic content
-- informative: explanations, factual questions
-- emotional: feelings, support, personal states
-- math: calculations, proofs, equations
-- vision: image analysis (not generation)
-- branding: brand, marketing, identity
-- efficiency: optimization, productivity
-- current: news, time-sensitive topics
-- other: anything else
+User input:
+"""${text}"""
+`.trim();
+}
 
-Confidence:
-- ≥0.8 clear
-- 0.5–0.8 mixed
-- ≤0.5 unclear
+/* -------------------------------------------------------------------------- */
+/*                              NORMALIZATION                                 */
+/* -------------------------------------------------------------------------- */
 
-You MUST output ONLY valid JSON.`;
+function normalizeCategory(raw?: string): Category {
+  if (!raw) return 'other';
 
-/* ------------------------------------------------------------------ */
-/* PROVIDER SELECTION                                                 */
-/* ------------------------------------------------------------------ */
+  const c = raw.toLowerCase().trim();
 
-/**
- * Explicit provider priority for intent classification
- * (quality / price / latency optimized)
- */
-function getIntentProviders(): ModelProvider[] {
-  const enabled = getProvidersOrdered()
-    .filter((p) => p.enabled)
-    .map((p) => p.name);
-
-  const providers: ModelProvider[] = [];
-
-  if (enabled.includes('gemini')) {
-    providers.push(new GeminiProvider());
+  if (ALLOWED_CATEGORIES.includes(c as Category)) {
+    return c as Category;
   }
 
-  if (enabled.includes('deepseek')) {
-    providers.push(new DeepSeekProvider());
-  }
+  if (c.includes('code') || c.includes('program')) return 'code';
+  if (c.includes('math') || c.includes('calc')) return 'math';
+  if (c.includes('feel') || c.includes('emotion')) return 'emotional';
+  if (c.includes('story') || c.includes('create') || c.includes('poem'))
+    return 'creative';
+  if (c.includes('brand') || c.includes('logo')) return 'branding';
+  if (c.includes('image') || c.includes('vision')) return 'vision';
+  if (c.includes('news') || c.includes('today')) return 'current';
+  if (c.includes('optimize') || c.includes('speed')) return 'efficiency';
 
-  return providers;
+  return 'other';
 }
 
-/* ------------------------------------------------------------------ */
-/* HELPERS                                                            */
-/* ------------------------------------------------------------------ */
-
-function parseIntentJson(response: string): LLMIntentOutput | null {
-  try {
-    const cleaned = response
-      .trim()
-      .replace(/^```(?:json)?/i, '')
-      .replace(/```$/i, '')
-      .trim();
-
-    const parsed = JSON.parse(cleaned) as LLMIntentOutput;
-
-    if (!parsed.category || typeof parsed.confidence !== 'number') {
-      return null;
-    }
-
-    parsed.confidence = Math.max(0, Math.min(1, parsed.confidence));
-
-    return parsed;
-  } catch {
-    return null;
-  }
+function clampConfidence(x: unknown): number {
+  if (typeof x !== 'number' || Number.isNaN(x)) return 0.5;
+  return Math.max(0, Math.min(1, x));
 }
 
-function fallbackProfile(): IntentProfile {
-  return {
-    intent: 'unknown',
-    category: 'other',
-    confidence: 0.0,
-    entities: { depth: 'shallow', complexity: 'low' },
-    risk: { severity: 'low' }
-  };
-}
-
-function toIntentProfile(out: LLMIntentOutput): IntentProfile {
-  return {
-    intent: `${out.category}_intent`,
-    category: out.category,
-    confidence: out.confidence,
-    entities: {
-      depth: out.entities?.depth ?? 'shallow',
-      complexity: out.entities?.complexity ?? 'low'
-    },
-    risk: {
-      severity: out.risk?.severity ?? 'low'
-    }
-  };
-}
-
-/* ------------------------------------------------------------------ */
-/* MAIN API                                                           */
-/* ------------------------------------------------------------------ */
+/* -------------------------------------------------------------------------- */
+/*                              CORE LOGIC                                    */
+/* -------------------------------------------------------------------------- */
 
 export async function analyzeIntentWithLLM(
   text: string
 ): Promise<IntentProfile> {
-  if (!text || typeof text !== 'string') {
-    return fallbackProfile();
-  }
+  const prompt = buildPrompt(text);
 
-  const providers = getIntentProviders();
-  if (providers.length === 0) {
-    return fallbackProfile();
-  }
+  try {
+    const out = await executeWithFailover(PROVIDERS, prompt, {
+      maxTokens: 120, // 👈 reduced for Gemini free
+      temperature: 0
+    });
 
-  for (const provider of providers) {
-    // Retry same provider twice
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const prompt = `${SYSTEM_PROMPT}\n\nUser input: "${text}"`;
+    const rawText = out?.result?.text;
+    if (!rawText) throw new Error('empty_intent_response');
 
-        const result = await provider.execute(prompt, {
-          temperature: 0.2,
-          maxTokens: 300
-        });
+    let parsed: any;
 
-        const parsed = parseIntentJson(result.text);
-        if (parsed) {
-          return toIntentProfile(parsed);
-        }
-      } catch {
-        // silent retry
-      }
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      // Gemini free sometimes returns text + JSON
+      const match = rawText.match(/\{[\s\S]*\}/);
+      if (!match) throw new Error('invalid_json');
+      parsed = JSON.parse(match[0]);
     }
-  }
 
-  return fallbackProfile();
+    const category = normalizeCategory(parsed.category);
+
+    return {
+      intent: category, // 👈 intent === category (aligned)
+      category,
+      confidence: clampConfidence(parsed.confidence),
+      entities: {
+        complexity:
+          parsed.entities?.complexity ??
+          inferComplexity(text)
+      }
+    };
+  } catch {
+    /* ---------------------------- FAILSAFE ---------------------------- */
+    const fallbackCategory: Category = 'other';
+
+    return {
+      intent: fallbackCategory,
+      category: fallbackCategory,
+      confidence: 0.3,
+      entities: {
+        complexity: inferComplexity(text)
+      }
+    };
+  }
 }
 
-export default { analyzeIntentWithLLM };
+/* -------------------------------------------------------------------------- */
+/*                          COMPLEXITY HEURISTIC                               */
+/* -------------------------------------------------------------------------- */
+
+function inferComplexity(text: string): 'low' | 'medium' | 'high' {
+  const words = text.trim().split(/\s+/).filter(Boolean).length;
+
+  if (words < 8) return 'low';
+  if (words > 40) return 'high';
+  return 'medium';
+}
+
+export default {
+  analyzeIntentWithLLM
+};
