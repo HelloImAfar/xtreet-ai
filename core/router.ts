@@ -7,6 +7,7 @@ import type {
 } from '@/types/rex';
 
 import { getProvidersOrdered, getConfig } from './config';
+import providerRegistry from './providerRegistry';
 import { selectStrategicModel } from './strategicModelSelector';
 
 /* -------------------------------------------------------------------------- */
@@ -46,6 +47,8 @@ function buildCandidates(maxCandidates = 4): ModelCandidate[] {
 
   for (const p of providers) {
     if (!p.enabled) continue;
+    // Skip providers that are not registered in the runtime provider registry
+    if (!providerRegistry.isKnownProvider(p.name)) continue;
 
     const meta = p.meta || {};
 

@@ -26,7 +26,6 @@ import GeminiProvider from './models/gemini/geminiProvider';
 import LlamaProvider from './models/llama/llamaProvider';
 import MistralProvider from './models/mistral/mistralProvider';
 import QwenProvider from './models/qwen/qwenProvider';
-import MockProvider from './models/mockProvider';
 
 import type {
   Category,
@@ -46,41 +45,6 @@ const cache = new LRU<string, any>({
 });
 
 /* -------------------------------------------------------------------------- */
-/*                                RATE LIMIT                                  */
-/* -------------------------------------------------------------------------- */
-
-const rateLimitBuckets = new Map<
-  string,
-  { tokens: number; lastRefill: number }
->();
-
-const RATE_LIMIT_MAX_TOKENS = 10;
-const RATE_LIMIT_REFILL_MS = 60_000;
-
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  let bucket = rateLimitBuckets.get(ip);
-
-  if (!bucket) {
-    bucket = { tokens: RATE_LIMIT_MAX_TOKENS, lastRefill: now };
-    rateLimitBuckets.set(ip, bucket);
-  }
-
-  const elapsed = now - bucket.lastRefill;
-  const refill = (elapsed / RATE_LIMIT_REFILL_MS) * RATE_LIMIT_MAX_TOKENS;
-
-  bucket.tokens = Math.min(RATE_LIMIT_MAX_TOKENS, bucket.tokens + refill);
-  bucket.lastRefill = now;
-
-  if (bucket.tokens >= 1) {
-    bucket.tokens -= 1;
-    return true;
-  }
-
-  return false;
-}
-
-/* -------------------------------------------------------------------------- */
 /*                              PROVIDER REGISTRY                              */
 /* -------------------------------------------------------------------------- */
 
@@ -92,19 +56,9 @@ type ProviderInstance =
   | GeminiProvider
   | LlamaProvider
   | MistralProvider
-  | QwenProvider
-  | MockProvider;
+  | QwenProvider;
 
-const providerFactories: Record<string, () => ProviderInstance> = {
-  openai: () => new OpenAIProvider(),
-  claude: () => new ClaudeProvider(),
-  deepseek: () => new DeepSeekProvider(),
-  grok: () => new GrokProvider(),
-  gemini: () => new GeminiProvider(),
-  llama: () => new LlamaProvider(),
-  mistral: () => new MistralProvider(),
-  qwen: () => new QwenProvider()
-};
+import providerRegistry from './providerRegistry';
 
 /* -------------------------------------------------------------------------- */
 /*                                   RESULT                                   */
@@ -135,44 +89,19 @@ export async function handleMessage(
   };
 
   try {
-    /* ------------------------------ RATE LIMIT ----------------------------- */
-    if (!checkRateLimit(clientIp)) {
-      return {
-        ok: false,
-        category: 'other',
-        modelPlan: [],
-        response: 'Rate limit exceeded.',
-        tokensUsed: 0,
-        estimatedCost: 0,
-        errors: ['rate_limit']
-      };
-    }
-
-    /* -------------------------------- CACHE -------------------------------- */
-    const cacheKey = `msg:${req.userId}:${req.text.slice(0, 200)}`;
-    const cached = cache.get(cacheKey);
-    if (cached) return cached;
-
-    /* ---------------------------- SECURITY (PRE) ---------------------------- */
-    const preSecurity = runSecurityChecks(ctx);
-    if (preSecurity.some((s) => s.severity === 'high')) {
-      return {
-        ok: false,
-        category: 'other',
-        modelPlan: [],
-        response: 'Request blocked by security policy.',
-        tokensUsed: 0,
-        estimatedCost: 0,
-        errors: ['security_block']
-      };
-    }
-
-    /* ----------------------------- MEMORY LOAD ------------------------------ */
+    /* ----------------------------- MEMORY LOAD ----------------------------- */
     ctx.memorySnapshot = await getMemory(req.userId);
 
     /* ------------------------------- INTENT -------------------------------- */
     const intent = await analyzeIntentWithLLM(req.text);
     ctx.intent = intent;
+
+    logger.info({
+      event: 'intent_result',
+      category: intent.category,
+      confidence: intent.confidence,
+      entities: intent.entities
+    });
 
     /* ------------------------------ DECOMPOSE ------------------------------- */
     const tasks = await decomposeIfNeeded(req.text, intent.category);
@@ -205,43 +134,66 @@ export async function handleMessage(
 
     /* -------------------------------- ROUTING ------------------------------- */
     ctx.routing = {};
+
     for (const task of tasks) {
-      ctx.routing[task.id] = routeTask(task, intent, ctx);
+      const decision = routeTask(task, intent, ctx);
+      ctx.routing[task.id] = decision;
+
+      logger.info({
+        event: 'routing_decision',
+        taskId: task.id,
+        intent: intent.category,
+        selected: decision.selected,
+        candidates: decision.candidates
+      });
     }
 
     /* ------------------------------- PROVIDERS ------------------------------ */
     const requestId = `${req.userId}:${Date.now()}`;
-    const costController = new CostController({
-      userId: req.userId,
-      requestId
-    });
+    const costController = new CostController({ userId: req.userId, requestId });
 
     const providerCache: Record<string, ProviderInstance> = {};
 
-    const getProvider = (name: string): ProviderInstance => {
-      if (!providerCache[name]) {
-        providerCache[name] =
-          providerFactories[name]?.() ?? new MockProvider();
+    const getProvider = (name: string): ProviderInstance | undefined => {
+      if (!providerRegistry.isKnownProvider(name)) {
+        logger.warn('Engine requested unknown provider', { provider: name });
+        return undefined;
       }
+
+      if (!providerCache[name]) {
+        const inst = providerRegistry.createProvider(name);
+        if (!inst) {
+          logger.warn('Failed to construct provider instance', { provider: name });
+          return undefined;
+        }
+        providerCache[name] = inst as ProviderInstance;
+      }
+
       return providerCache[name];
     };
 
     for (const task of tasks) {
-      const decision = ctx.routing?.[task.id];
-      if (!decision) {
+      const decision = ctx.routing[task.id];
+      if (!decision?.selected) {
         errors.push(`routing_missing:${task.id}`);
         continue;
       }
 
-      const providers = decision.candidates
+      const candidateInstances = decision.candidates
         .map((c) => getProvider(c.provider))
-        .filter(Boolean);
+        .filter((p): p is ProviderInstance => !!p);
+
+      if (candidateInstances.length === 0) {
+        errors.push(`no_available_providers:${task.id}`);
+        logger.error('No available providers to execute task', { taskId: task.id, candidates: decision.candidates.map((c) => c.provider) });
+        continue;
+      }
 
       const out = await executeWithFailover(
-        providers.length ? providers : [new MockProvider()],
+        candidateInstances,
         task.text,
         {
-          model: decision.selected?.model,
+          model: decision.selected.model,
           maxTokens: 512
         }
       );
@@ -253,7 +205,7 @@ export async function handleMessage(
 
       costController.addUsage({
         provider: out.providerId ?? 'unknown',
-        model: decision.selected?.model ?? 'unknown',
+        model: decision.selected.model ?? 'unknown',
         tokensOutput: out.result.tokensUsed ?? 0
       });
 
@@ -261,7 +213,7 @@ export async function handleMessage(
         {
           taskId: task.id,
           provider: out.providerId ?? 'unknown',
-          model: decision.selected?.model ?? 'unknown',
+          model: decision.selected.model ?? 'unknown',
           text: out.result.text,
           status: 'fulfilled',
           tokensUsed: out.result.tokensUsed
@@ -301,7 +253,7 @@ export async function handleMessage(
     /* ---------------------------------- COST -------------------------------- */
     const costReport = costController.getReport();
 
-    const result: EngineResult = {
+    return {
       ok: errors.length === 0,
       category: intent.category,
       modelPlan,
@@ -310,9 +262,6 @@ export async function handleMessage(
       estimatedCost: costReport.estimatedCost,
       errors: errors.length ? errors : undefined
     };
-
-    cache.set(cacheKey, result);
-    return result;
   } catch (e) {
     logger.error('Engine fatal error', { error: String(e) });
 
@@ -328,7 +277,4 @@ export async function handleMessage(
   }
 }
 
-export default {
-  handleMessage,
-  checkRateLimit
-};
+export default { handleMessage };
