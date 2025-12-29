@@ -1,51 +1,68 @@
-import type { CallModelPayload, ModelResponse } from '../../../types';
+import logger from '../../logger';
+import type { CallModelPayload, ModelResponse } from '@/types';
+
+const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1';
 
 export async function callModel(
   payload: CallModelPayload
 ): Promise<ModelResponse> {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY not configured');
-  }
+  if (!apiKey) throw new Error('GEMINI_API_KEY missing');
 
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${payload.model}:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: payload.prompt }]
-          }
-        ],
-        generationConfig: {
-          temperature: payload.temperature ?? 0,
-          maxOutputTokens: payload.maxTokens ?? 256
-        }
-      })
+  const {
+    prompt,
+    model,
+    maxTokens = 512,
+    temperature = 0.7
+  } = payload;
+
+  const url = `${GEMINI_ENDPOINT}/models/${model}:generateContent`;
+
+  const body = {
+    contents: [
+      {
+        role: 'user',
+        parts: [{ text: prompt }]
+      }
+    ],
+    generationConfig: {
+      temperature,
+      maxOutputTokens: maxTokens
     }
-  );
+  };
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Gemini API error: ${err}`);
-  }
+  logger.info({
+    event: 'gemini_request',
+    model,
+    endpoint: url
+  });
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': apiKey
+    },
+    body: JSON.stringify(body)
+  });
 
   const json = await res.json();
 
+  if (!res.ok) {
+    logger.error({
+      event: 'gemini_error',
+      status: res.status,
+      response: json
+    });
+    throw new Error(JSON.stringify(json));
+  }
+
   const text =
-    json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    json?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
 
   return {
     text,
-    tokensUsed: Math.ceil(text.length / 4),
-    meta: {
-      provider: 'gemini',
-      model: payload.model
-    }
+    tokensUsed: json?.usageMetadata?.totalTokenCount ?? 0,
+    meta: json?.usageMetadata
   };
 }
-
-export default { callModel };

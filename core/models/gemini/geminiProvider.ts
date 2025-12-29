@@ -3,6 +3,10 @@ import { timeoutPromise } from '../../../lib/utils';
 import { BaseModelProvider, ExecuteConfig, ExecuteResult } from '../provider';
 import { callGemini } from './geminiClient';
 
+/* -------------------------------------------------------------------------- */
+/* MODEL RESOLUTION                                                           */
+/* -------------------------------------------------------------------------- */
+
 function resolveGeminiModel(alias?: string): string {
   switch (alias) {
     case 'fast':
@@ -14,6 +18,10 @@ function resolveGeminiModel(alias?: string): string {
       return process.env.GEMINI_MODEL_DEFAULT!;
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* PROVIDER                                                                   */
+/* -------------------------------------------------------------------------- */
 
 export class GeminiProvider extends BaseModelProvider {
   id = 'gemini';
@@ -28,9 +36,22 @@ export class GeminiProvider extends BaseModelProvider {
       typeof config.temperature === 'number' ? config.temperature : 0.7;
     const timeoutMs = config.timeoutMs ?? 15_000;
 
+    // 🔍 DEBUG CRÍTICO
+    logger.info({
+      event: 'gemini_execute',
+      model,
+      maxTokens,
+      temperature
+    });
+
     try {
       const resp = await timeoutPromise(
-        callGemini({ prompt, model, maxTokens, temperature } as any),
+        callGemini({
+          prompt,
+          model,
+          maxTokens,
+          temperature
+        }),
         timeoutMs,
         () => logger.warn('Gemini request timed out')
       );
@@ -41,7 +62,11 @@ export class GeminiProvider extends BaseModelProvider {
         meta: resp.meta
       };
     } catch (err: any) {
-      logger.warn('Gemini provider error', { error: String(err) });
+      logger.warn('Gemini provider error', {
+        model,
+        error: err instanceof Error ? err.message : String(err)
+      });
+
       throw new Error(`Gemini provider error: ${String(err)}`);
     }
   }
