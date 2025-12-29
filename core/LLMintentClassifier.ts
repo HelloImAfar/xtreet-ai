@@ -1,18 +1,17 @@
 /**
  * core/LLMintentClassifier.ts
  * Xtreet AI — GEN 1
- * PURE LLM INTENT CLASSIFIER
- * (NO KEYWORDS, NO HEURISTICS, NO FALLBACK)
+ * PURE LLM INTENT CLASSIFIER (GEMINI)
  */
 
 import logger from './logger';
 import type { Category } from '../types';
 import type { IntentProfile } from '../types/rex';
 
-import DeepSeekProvider from './models/deepseek/deepseekProvider';
+import GeminiProvider from './models/gemini/geminiProvider';
 
 /* -------------------------------------------------------------------------- */
-/*                                   CONFIG                                   */
+/* CONFIG                                                                     */
 /* -------------------------------------------------------------------------- */
 
 const CATEGORIES: Category[] = [
@@ -29,23 +28,31 @@ const CATEGORIES: Category[] = [
   'other'
 ];
 
-// GEN 1: single LLM, deterministic, no routing
-const llm = new DeepSeekProvider();
+// GEN 1: single deterministic LLM for intent
+const llm = new GeminiProvider();
 
 /* -------------------------------------------------------------------------- */
-/*                              JSON PARSING                                  */
+/* JSON PARSING (DEFENSIVE, LLM-SAFE)                                         */
 /* -------------------------------------------------------------------------- */
 
-function tryParseJSON(text: string): any | null {
+function safeJSON(text: string): any | null {
   try {
-    return JSON.parse(text);
+    if (!text || typeof text !== 'string') return null;
+
+    const cleaned = text
+      .trim()
+      .replace(/```json/gi, '')
+      .replace(/```/g, '')
+      .trim();
+
+    return JSON.parse(cleaned);
   } catch {
     return null;
   }
 }
 
 /* -------------------------------------------------------------------------- */
-/*                                   MAIN                                     */
+/* MAIN                                                                       */
 /* -------------------------------------------------------------------------- */
 
 export async function analyzeIntentWithLLM(
@@ -54,28 +61,31 @@ export async function analyzeIntentWithLLM(
   const prompt = `
 You are an intent classification engine.
 
-You MUST infer intent from meaning, context, tone and implication.
-You MUST NOT rely on keywords.
+Infer intent from meaning, context, tone and implication.
+Do NOT rely on keywords.
 
 Return ONLY valid JSON.
-NO text.
-NO explanation.
-NO markdown.
+No markdown. No explanations. No extra text.
 
 Allowed categories:
 ${CATEGORIES.join(', ')}
 
 JSON schema:
 {
-  "intent": "short_semantic_label",
-  "category": "one_of_allowed_categories",
-  "confidence": number_between_0_and_1,
-  "entities": object
+  "intent": "short semantic description",
+  "category": "one of the allowed categories",
+  "confidence": number between 0 and 1
 }
 
 User input:
 """${text}"""
 `.trim();
+
+  logger.info({
+    event: 'intent_llm_request',
+    provider: 'gemini',
+    promptPreview: prompt.slice(0, 200)
+  });
 
   let rawText = '';
 
@@ -89,21 +99,37 @@ User input:
 
     logger.info({
       event: 'intent_llm_raw_response',
-      provider: 'deepseek',
+      provider: 'gemini',
       rawText
     });
 
-    const parsed = tryParseJSON(rawText);
+    if (!rawText) {
+      logger.error({
+        event: 'intent_llm_empty_response',
+        provider: 'gemini'
+      });
+
+      return {
+        intent: 'empty_llm_response',
+        category: 'other',
+        confidence: 0,
+        entities: {
+          error: 'EMPTY_RESPONSE_FROM_LLM'
+        }
+      };
+    }
+
+    const parsed = safeJSON(rawText);
 
     if (!parsed) {
       logger.error({
         event: 'intent_llm_invalid_json',
-        provider: 'deepseek',
+        provider: 'gemini',
         rawText
       });
 
       return {
-        intent: 'llm_invalid_json',
+        intent: 'invalid_json',
         category: 'other',
         confidence: 0,
         entities: {
@@ -116,13 +142,13 @@ User input:
     if (!CATEGORIES.includes(parsed.category)) {
       logger.error({
         event: 'intent_llm_invalid_category',
-        provider: 'deepseek',
+        provider: 'gemini',
         category: parsed.category,
         rawText
       });
 
       return {
-        intent: parsed.intent ?? 'llm_invalid_category',
+        intent: parsed.intent ?? 'invalid_category',
         category: 'other',
         confidence: 0,
         entities: {
@@ -139,15 +165,12 @@ User input:
         typeof parsed.confidence === 'number'
           ? Math.max(0, Math.min(1, parsed.confidence))
           : 0.5,
-      entities:
-        typeof parsed.entities === 'object' && parsed.entities !== null
-          ? parsed.entities
-          : {}
+      entities: {}
     };
   } catch (err) {
     logger.error({
       event: 'intent_llm_execution_failed',
-      provider: 'deepseek',
+      provider: 'gemini',
       error: err instanceof Error ? err.message : String(err),
       rawText
     });

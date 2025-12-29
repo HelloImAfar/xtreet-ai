@@ -1,20 +1,51 @@
 import type { CallModelPayload, ModelResponse } from '../../../types';
 
-// Stub adapter for Google Gemini. Replace with real API calls when ready.
-export async function callModel(payload: CallModelPayload): Promise<ModelResponse> {
-  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-  if (!GEMINI_API_KEY) {
-    return {
-      text: '[Gemini stub] API key not configured',
-      tokensUsed: 10,
-      meta: { provider: 'gemini-stub' }
-    };
+export async function callModel(
+  payload: CallModelPayload
+): Promise<ModelResponse> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY not configured');
   }
 
-  // TODO: Implement real Google Gemini API call
-  // const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent`, { ... })
-  const text = `[GEMINI RESPONSE (placeholder)]\n${payload.prompt.slice(0, 200)}`;
-  return { text, tokensUsed: Math.ceil(text.length / 4), meta: { provider: 'gemini' } };
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${payload.model}:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: payload.prompt }]
+          }
+        ],
+        generationConfig: {
+          temperature: payload.temperature ?? 0,
+          maxOutputTokens: payload.maxTokens ?? 256
+        }
+      })
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Gemini API error: ${err}`);
+  }
+
+  const json = await res.json();
+
+  const text =
+    json.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+
+  return {
+    text,
+    tokensUsed: Math.ceil(text.length / 4),
+    meta: {
+      provider: 'gemini',
+      model: payload.model
+    }
+  };
 }
 
 export default { callModel };
