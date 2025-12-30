@@ -101,6 +101,13 @@ export async function executeWithFailover(
             partialResults.push({ provider: provider.id, res });
           }
 
+                    logger.warn({
+            event: 'failover_partial_return',
+            provider: provider.id,
+            depth,
+            tokensUsed: res.tokensUsed,
+          });
+
           if (allowPartial && attempt === maxRetries) {
             return {
               result: res,
@@ -113,6 +120,14 @@ export async function executeWithFailover(
 
           continue;
         }
+
+                logger.info({
+          event: 'failover_success',
+          provider: provider.id,
+          depth,
+          partial: false,
+          tokensUsed: res.tokensUsed,
+        });
 
         return {
           result: res,
@@ -167,6 +182,13 @@ export async function executeWithFailover(
       meta: mergedMeta,
     };
 
+        logger.warn({
+      event: 'failover_partial_merge',
+      depth,
+      providers: partialResults.map(p => p.provider),
+      totalTokens: mergedTokens,
+    });
+
     return {
       result: mergedResult,
       providerId: partialResults[0].provider,
@@ -175,6 +197,13 @@ export async function executeWithFailover(
       errors,
     };
   }
+
+    logger.error({
+    event: 'failover_failed',
+    depth,
+    providersTried: usedProviders,
+    errorsCount: errors.length,
+  });
 
   return {
     result: null,

@@ -1,46 +1,39 @@
 import type { DecomposedTask } from '@/types/rex';
+import logger from './logger';
 
 /**
- * Decompose a user text into an array of atomic tasks.
- * Heuristics:
- * - If input contains explicit list markers (numbers, bullets) split by lines
- * - Else split by sentences and conjunctions
- * - Detect sequence markers (first/then/next) and create ordered dependencies
- * - For plain "A and B" style coordination, create parallelizable tasks (no deps)
- * Returns tasks with ids, preserved order and dependency hints.
+ * Decompose a user text into atomic tasks.
+ * taskId is prefixed with requestId to guarantee global uniqueness.
  */
-export function decompose(text: string): DecomposedTask[] {
+export function decompose(text: string, requestId = 'r0'): DecomposedTask[] {
   const t = (text || '').trim();
-  if (!t) return [{ id: 't0', text: '' }];
+  if (!t) return [{ id: `${requestId}_t0`, text: '' }];
 
-  // 1) Detect explicit lists (lines that look like list items)
-  const lines = t.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+  const lines = t.split(/\n+/).map(l => l.trim()).filter(Boolean);
   const listItemPattern = /^([\-\*•]|\d+[\)\.]|[a-zA-Z]\))/;
-  const isList = lines.length > 1 && lines.every((l) => listItemPattern.test(l) || l.length < 120);
+  const isList = lines.length > 1 && lines.every(l => listItemPattern.test(l) || l.length < 120);
+
+  const tasks: DecomposedTask[] = [];
+
   if (isList) {
-    const tasks: DecomposedTask[] = [];
     lines.forEach((line, i) => {
-      // strip leading bullets/numbers
       const cleaned = line.replace(/^([\-\*•]|\d+[\)\.]|[a-zA-Z]\))\s*/, '');
-      tasks.push({ id: `t${i}`, text: cleaned, priority: lines.length - i });
+      tasks.push({ id: `${requestId}_t${i}`, text: cleaned, priority: lines.length - i });
     });
+    logger.info({ event: 'decompose_list', requestId, count: tasks.length });
     return tasks;
   }
 
-  // 2) Sentence + conjunction based splitting
-  // First split on sentences
-  const sentences = t.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
-  // If single sentence but contains commas/ands, split into clauses
+  // Sentence + conjunction splitting
+  const sentences = t.split(/(?<=[.!?])\s+/).map(s => s.trim()).filter(Boolean);
   const clauses: string[] = [];
   for (const s of sentences) {
-    // split by semicolons first
-    const parts = s.split(/;|:\s+/).map((p) => p.trim()).filter(Boolean);
+    const parts = s.split(/;|:\s+/).map(p => p.trim()).filter(Boolean);
     for (const p of parts) {
-      // split by ' and ' only when it separates clauses (heuristic)
       if (/\band\b/i.test(p) && p.length < 300) {
-        const andParts = p.split(/\band\b/i).map((x) => x.trim()).filter(Boolean);
+        const andParts = p.split(/\band\b/i).map(x => x.trim()).filter(Boolean);
         if (andParts.length > 1) {
-          andParts.forEach((ap) => clauses.push(ap));
+          andParts.forEach(ap => clauses.push(ap));
           continue;
         }
       }
@@ -48,31 +41,22 @@ export function decompose(text: string): DecomposedTask[] {
     }
   }
 
-  // If after splitting we still have one clause, return as single task
-  if (clauses.length <= 1) return [{ id: 't0', text: t }];
+  if (clauses.length <= 1) return [{ id: `${requestId}_t0`, text: t }];
 
-  // 3) Detect sequencing words and assign dependencies
   const seqMarkers = /\b(first|then|next|after that|afterwards|finally|lastly|subsequently)\b/i;
-  const tasks: DecomposedTask[] = clauses.map((c, i) => ({ id: `t${i}`, text: c }));
+  clauses.forEach((c, i) => {
+    const task: DecomposedTask = { id: `${requestId}_t${i}`, text: c };
+    if (seqMarkers.test(t) || seqMarkers.test(c)) task.dependencies = i > 0 ? [`${requestId}_t${i - 1}`] : undefined;
+    task.priority = clauses.length - i;
+    tasks.push(task);
+  });
 
-  // Set dependencies if sequence markers present in clauses or overarching text
-  if (seqMarkers.test(t) || clauses.some((c) => seqMarkers.test(c))) {
-    for (let i = 0; i < tasks.length; i++) {
-      if (i > 0) tasks[i].dependencies = [tasks[i - 1].id];
-      tasks[i].priority = tasks.length - i; // earlier tasks have higher priority
-    }
-  } else {
-    // Default: no dependencies (parallelizable), but preserve order in ids
-    for (let i = 0; i < tasks.length; i++) tasks[i].priority = tasks.length - i;
-  }
-
+  logger.info({ event: 'decompose_clauses', requestId, count: tasks.length });
   return tasks;
 }
 
-export function decomposeIfNeeded(text: string, category?: string) {
-  // Lightweight compatibility wrapper — actual decomposition is pure and deterministic
-  const tasks = decompose(text);
-  return tasks;
+export function decomposeIfNeeded(text: string, requestId?: string) {
+  return decompose(text, requestId);
 }
 
 export default { decompose, decomposeIfNeeded };

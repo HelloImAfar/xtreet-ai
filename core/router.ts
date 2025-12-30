@@ -11,6 +11,31 @@ import providerRegistry from './providerRegistry';
 import { selectStrategicModel } from './strategicModelSelector';
 
 /* -------------------------------------------------------------------------- */
+/*                                  TYPES                                     */
+/* -------------------------------------------------------------------------- */
+
+type Depth = 'trivial' | 'normal' | 'deep';
+type TaskComplexity = 'low' | 'medium' | 'high';
+
+/* -------------------------------------------------------------------------- */
+/*                         DEPTH → COMPLEXITY MAP                              */
+/* -------------------------------------------------------------------------- */
+/* GEN 1 ADAPTER — do NOT remove (GEN 2 may unify this) */
+
+function mapDepthToTaskComplexity(depth: Depth): TaskComplexity {
+  switch (depth) {
+    case 'trivial':
+      return 'low';
+    case 'normal':
+      return 'medium';
+    case 'deep':
+      return 'high';
+    default:
+      return 'medium';
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /*                                  SCORING                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -47,7 +72,6 @@ function buildCandidates(maxCandidates = 4): ModelCandidate[] {
 
   for (const p of providers) {
     if (!p.enabled) continue;
-    // Skip providers that are not registered in the runtime provider registry
     if (!providerRegistry.isKnownProvider(p.name)) continue;
 
     const meta = p.meta || {};
@@ -81,16 +105,29 @@ export function routeTask(
   const scoring = opts.scoring ?? defaultScoring;
   const maxCandidates = opts.maxCandidates ?? 4;
 
+  const depth: Depth =
+    (intent?.entities as any)?.complexity === 'trivial'
+      ? 'trivial'
+      : (intent?.entities as any)?.complexity === 'deep'
+      ? 'deep'
+      : 'normal';
+
+  const taskComplexity = mapDepthToTaskComplexity(depth);
+
   /* ------------------------------------------------------------------ */
-  /* 🚀 FAST — HARD EXIT (NO FAILSAFE, NO SCORING, NO CANDIDATES)        */
+  /* 🚀 FAST — HARD EXIT                                                 */
   /* ------------------------------------------------------------------ */
 
   if (
     intent?.category === 'fast' &&
     intent.confidence >= 0.9 &&
-    (intent.entities as any)?.complexity === 'low'
+    taskComplexity === 'low'
   ) {
-    const strategy = selectStrategicModel('fast', 1, 'low');
+    const strategy = selectStrategicModel(
+      'fast',
+      1,
+      taskComplexity
+    );
 
     const selected: ModelCandidate = {
       provider: strategy.primary.provider,
@@ -118,7 +155,7 @@ export function routeTask(
       const strategy = selectStrategicModel(
         intent.category,
         intent.confidence,
-        (intent.entities as any)?.complexity ?? 'medium'
+        taskComplexity
       );
 
       const strategicProviders = [
@@ -151,11 +188,10 @@ export function routeTask(
       });
     }
   } catch {
-    // never break routing
+    // routing must NEVER break
   }
 
   /* ------------------------ GLOBAL FAILSAFE -------------------------- */
-  /* Only if NOTHING strategic exists                                   */
 
   const hasStrategic = candidates.some((c) =>
     c.reason?.startsWith('strategic:')
@@ -164,19 +200,11 @@ export function routeTask(
   if (!hasStrategic) {
     candidates = candidates.map((c) => {
       if (c.provider === 'deepseek') {
-        return {
-          ...c,
-          reason: 'strategic:failsafe-global'
-        };
+        return { ...c, reason: 'strategic:failsafe-global' };
       }
-
       if (c.provider === 'mistral') {
-        return {
-          ...c,
-          reason: 'strategic:failsafe-secondary'
-        };
+        return { ...c, reason: 'strategic:failsafe-secondary' };
       }
-
       return c;
     });
   }
@@ -197,13 +225,9 @@ export function routeTask(
   let parallel = false;
 
   try {
-    const complexity =
-      ctx?.request?.meta?.complexity ||
-      (intent?.entities as any)?.complexity;
-
     if (
       cfg.features?.multicore &&
-      (complexity === 'high' || complexity === 'deep')
+      (taskComplexity === 'high')
     ) {
       parallel = true;
     }

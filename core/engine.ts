@@ -180,11 +180,19 @@ export async function handleMessage(
         continue;
       }
 
-      /* 🔹 DEPTH DECISION (GEN 1, SAFE, DETERMINISTIC) */
+      /* 🔹 DEPTH DECISION (GEN 1 — SINGLE SOURCE OF TRUTH) */
       const depth: 'fast' | 'normal' | 'deep' =
-        intent.category === 'code' || intent.category === 'math'
-          ? 'deep'
-          : 'normal';
+        intent.entities?.complexity === 'trivial'
+          ? 'fast'
+          : intent.entities?.complexity === 'deep'
+            ? 'deep'
+            : 'normal';
+
+      logger.info({
+        event: 'depth_resolved',
+        depth,
+        complexity: intent.entities?.complexity ?? 'missing',
+      });
 
       const providers = decision.candidates
         .map((c) => getProvider(c.provider))

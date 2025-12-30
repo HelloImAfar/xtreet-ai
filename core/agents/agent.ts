@@ -1,5 +1,11 @@
 import type { PipelineContext } from '@/types/rex';
 
+// Minimal logger compatible con GEN 1
+const logger = {
+  info: (obj: any) => console.log('[INFO]', obj),
+  error: (obj: any) => console.error('[ERROR]', obj),
+};
+
 export type AgentInput = {
   taskId?: string;
   text: string;
@@ -9,9 +15,9 @@ export type AgentInput = {
 export type AgentOutput = {
   agentId: string;
   taskId?: string;
-  text?: string; // transformed text or annotations
-  notes?: string[]; // suggestions or notes
-  issues?: Array<{ type: string; message: string }>; // problems found
+  text?: string;
+  notes?: string[];
+  issues?: Array<{ type: string; message: string }>;
   metadata?: Record<string, any>;
 };
 
@@ -26,22 +32,44 @@ export async function runAgents(
   opts?: { parallel?: boolean }
 ): Promise<AgentOutput[]> {
   if (!agents || agents.length === 0) return [];
+
+  const executed = new Set<string>();
+
+  const runOne = async (a: Agent) => {
+    const key = `${input.taskId}_${a.id}`;
+    if (executed.has(key)) {
+      logger.info({ event: 'agent_skipped', agentId: a.id, taskId: input.taskId });
+      return null;
+    }
+    executed.add(key);
+
+    try {
+      const out = await a.run(input);
+      logger.info({ event: 'agent_executed', agentId: a.id, taskId: input.taskId });
+      return out;
+    } catch (e: any) {
+      logger.error({ event: 'agent_error', agentId: a.id, taskId: input.taskId, error: e?.message || String(e) });
+      return {
+        agentId: a.id,
+        taskId: input.taskId,
+        notes: [],
+        issues: [{ type: 'error', message: String(e) }],
+        metadata: {},
+      };
+    }
+  };
+
   if (opts?.parallel) {
-    return Promise.all(agents.map((a) => a.run(input)));
+    const results = await Promise.all(agents.map(runOne));
+    return results.filter(Boolean) as AgentOutput[];
   }
+
   const outputs: AgentOutput[] = [];
   for (const a of agents) {
-    // run sequentially
-    // agents are stateless; runner doesn't persist state
-    // catch errors to avoid breaking pipeline
-    try {
-      // eslint-disable-next-line no-await-in-loop
-      const out = await a.run(input);
-      outputs.push(out);
-    } catch (e: any) {
-      outputs.push({ agentId: a.id, taskId: input.taskId, notes: [], issues: [{ type: 'error', message: String(e) }], metadata: {} });
-    }
+    const out = await runOne(a);
+    if (out) outputs.push(out);
   }
+
   return outputs;
 }
 
