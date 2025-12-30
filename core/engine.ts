@@ -17,29 +17,49 @@ import { CostController } from './costController';
 import { analyzeIntentWithLLM } from './LLMintentClassifier';
 
 /* ----------------------------- PROVIDERS --------------------------------- */
-import providerRegistry from './providerRegistry';
+import OpenAIProvider from './models/openai/openaiProvider';
+import ClaudeProvider from './models/claude/claudeProvider';
+import DeepSeekProvider from './models/deepseek/deepseekProvider';
+import GrokProvider from './models/grok/grokProvider';
+import GeminiProvider from './models/gemini/geminiProvider';
+import LlamaProvider from './models/llama/llamaProvider';
+import MistralProvider from './models/mistral/mistralProvider';
+import QwenProvider from './models/qwen/qwenProvider';
 
 import type {
   Category,
   MessageRequest,
   RExRequest,
   PipelineContext,
-  AgentResult
+  AgentResult,
 } from '../types';
 
 /* -------------------------------------------------------------------------- */
-/*                                   CACHE                                    */
+/* CACHE (GEN 1: preparado, no usado aún) */
 /* -------------------------------------------------------------------------- */
-
-const cache = new LRU<string, any>({
+const cache = new LRU<string, unknown>({
   max: 100,
-  ttl: 1000 * 60 * 60
+  ttl: 1000 * 60 * 60,
 });
 
 /* -------------------------------------------------------------------------- */
-/*                                   RESULT                                   */
+/* PROVIDER REGISTRY */
 /* -------------------------------------------------------------------------- */
+type ProviderInstance =
+  | OpenAIProvider
+  | ClaudeProvider
+  | DeepSeekProvider
+  | GrokProvider
+  | GeminiProvider
+  | LlamaProvider
+  | MistralProvider
+  | QwenProvider;
 
+import providerRegistry from './providerRegistry';
+
+/* -------------------------------------------------------------------------- */
+/* RESULT */
+/* -------------------------------------------------------------------------- */
 export interface EngineResult {
   ok: boolean;
   category: Category;
@@ -51,20 +71,16 @@ export interface EngineResult {
 }
 
 /* -------------------------------------------------------------------------- */
-/*                               MAIN HANDLER                                  */
+/* MAIN HANDLER */
 /* -------------------------------------------------------------------------- */
-
 export async function handleMessage(
   req: MessageRequest,
   clientIp: string
 ): Promise<EngineResult> {
   const errors: string[] = [];
 
-  const ctx: PipelineContext & {
-    failures: Record<string, string[]>;
-  } = {
+  const ctx: PipelineContext = {
     request: req as RExRequest,
-    failures: {}
   };
 
   try {
@@ -78,7 +94,7 @@ export async function handleMessage(
     logger.info({
       event: 'intent_result',
       category: intent.category,
-      confidence: intent.confidence
+      confidence: intent.confidence,
     });
 
     /* ------------------------------ DECOMPOSE ------------------------------- */
@@ -89,7 +105,7 @@ export async function handleMessage(
     const agents = [
       LogicalAuditorAgent,
       StyleRefinementAgent,
-      CostOptimizationAgent
+      CostOptimizationAgent,
     ];
 
     ctx.agentResults = {};
@@ -98,7 +114,7 @@ export async function handleMessage(
       const outputs = await runAgents(agents, {
         taskId: task.id,
         text: task.text,
-        ctx
+        ctx,
       });
 
       ctx.agentResults[task.id] = outputs as AgentResult[];
@@ -120,8 +136,9 @@ export async function handleMessage(
       logger.info({
         event: 'routing_decision',
         taskId: task.id,
+        intent: intent.category,
         selected: decision.selected,
-        candidates: decision.candidates
+        candidates: decision.candidates,
       });
     }
 
@@ -129,128 +146,89 @@ export async function handleMessage(
     const requestId = `${req.userId}:${Date.now()}`;
     const costController = new CostController({ userId: req.userId, requestId });
 
-    const providerCache: Record<string, any> = {};
+    const providerCache: Record<string, ProviderInstance> = {};
 
-    const getProvider = (name: string) => {
-      if (!providerRegistry.isKnownProvider(name)) return undefined;
-      if (!providerCache[name]) {
-        providerCache[name] = providerRegistry.createProvider(name);
+    const getProvider = (name: string): ProviderInstance | undefined => {
+      if (!providerRegistry.isKnownProvider(name)) {
+        logger.warn('Unknown provider requested', { provider: name });
+        return undefined;
       }
+
+      if (!providerCache[name]) {
+        const inst = providerRegistry.createProvider(name);
+        if (!inst) {
+          logger.warn('Failed to create provider', { provider: name });
+          return undefined;
+        }
+        providerCache[name] = inst as ProviderInstance;
+      }
+
       return providerCache[name];
     };
 
-    const toProviders = (candidates: any[]) =>
-      candidates
-        .map((c) => getProvider(c.provider))
-        .filter(Boolean);
+    const maxTokensByDepth: Record<'fast' | 'normal' | 'deep', number> = {
+      fast: 256,
+      normal: 512,
+      deep: 1024,
+    };
 
     for (const task of tasks) {
       const decision = ctx.routing[task.id];
 
-      if (!decision?.candidates?.length) {
-        const err = `routing_missing:${task.id}`;
-        errors.push(err);
-        ctx.failures[task.id] = [err];
+      if (!decision?.selected) {
+        errors.push(`routing_missing:${task.id}`);
         continue;
       }
 
-      ctx.failures[task.id] = [];
+      /* 🔹 DEPTH DECISION (GEN 1, SAFE, DETERMINISTIC) */
+      const depth: 'fast' | 'normal' | 'deep' =
+        intent.category === 'code' || intent.category === 'math'
+          ? 'deep'
+          : 'normal';
 
-      const strategic = decision.candidates.filter(
-        (c) => c.reason?.startsWith('strategic:')
-      );
+      const providers = decision.candidates
+        .map((c) => getProvider(c.provider))
+        .filter((p): p is ProviderInstance => Boolean(p));
 
-      const nonStrategic = decision.candidates.filter(
-        (c) => !c.reason?.startsWith('strategic:')
-      );
-
-      let executionResult: any = null;
-
-      /* ------------------------- PHASE 1 — STRATEGIC ------------------------ */
-      if (strategic.length > 0) {
-        const providers = toProviders(strategic);
-
-        const out = await executeWithFailover(
-          providers,
-          task.text,
-          {
-            model: strategic[0].model,
-            maxTokens: 512
-          }
-        );
-
-        if (out.result?.text) {
-          executionResult = out;
-        } else {
-          const err = `strategic_failed:${strategic
-            .map((s) => s.provider)
-            .join(',')}`;
-          errors.push(err);
-          ctx.failures[task.id].push(err);
-        }
-      }
-
-      /* --------------------- PHASE 2 — QUALITY / PRICE ---------------------- */
-      if (!executionResult && nonStrategic.length > 0) {
-        const sorted = [...nonStrategic].sort((a, b) => {
-          const ca = a.costEstimate ?? 1;
-          const cb = b.costEstimate ?? 1;
-          return ca - cb;
+      if (providers.length === 0) {
+        errors.push(`no_available_providers:${task.id}`);
+        logger.error('No available providers', {
+          taskId: task.id,
+          candidates: decision.candidates.map((c) => c.provider),
         });
-
-        const providers = toProviders(sorted);
-
-        const out = await executeWithFailover(
-          providers,
-          task.text,
-          {
-            model: 'default',
-            maxTokens: 512
-          }
-        );
-
-        if (out.result?.text) {
-          executionResult = out;
-        } else {
-          const err = `heuristic_failed:${sorted
-            .map((s) => s.provider)
-            .join(',')}`;
-          errors.push(err);
-          ctx.failures[task.id].push(err);
-        }
+        continue;
       }
 
-      /* -------------------------- PHASE 3 — MOCK ---------------------------- */
-      if (!executionResult) {
-        const err = 'mock_used';
-        errors.push(err);
-        ctx.failures[task.id].push(err);
+      const out = await executeWithFailover(
+        providers,
+        task.text,
+        {
+          model: decision.selected.model,
+          maxTokens: maxTokensByDepth[depth],
+        },
+        { depth }
+      );
 
-        executionResult = {
-          result: {
-            text:
-              '[MOCK RESPONSE] No provider available to answer this request.',
-            tokensUsed: 0
-          },
-          providerId: 'mock'
-        };
+      if (!out?.result?.text) {
+        errors.push(`provider_error:${task.id}`);
+        continue;
       }
 
       costController.addUsage({
-        provider: executionResult.providerId ?? 'unknown',
-        model: decision.selected?.model ?? 'unknown',
-        tokensOutput: executionResult.result.tokensUsed ?? 0
+        provider: out.providerId ?? 'unknown',
+        model: decision.selected.model ?? 'unknown',
+        tokensOutput: out.result.tokensUsed ?? 0,
       });
 
       ctx.agentResults[task.id] = [
         {
           taskId: task.id,
-          provider: executionResult.providerId ?? 'unknown',
-          model: decision.selected?.model ?? 'unknown',
-          text: executionResult.result.text,
+          provider: out.providerId ?? 'unknown',
+          model: decision.selected.model ?? 'unknown',
+          text: out.result.text,
           status: 'fulfilled',
-          tokensUsed: executionResult.result.tokensUsed
-        }
+          tokensUsed: out.result.tokensUsed,
+        },
       ];
     }
 
@@ -270,54 +248,30 @@ export async function handleMessage(
         modelPlan.push(r.model);
         assembleInput.push({
           status: 'fulfilled',
-          value: { text: r.text }
+          value: { text: r.text },
         });
       }
     }
 
     const mergedText = await assemble(assembleInput);
 
-    /* ------------------------------- STYLE --------------------------------- */
+    /* --------------------------------- STYLE -------------------------------- */
     const styled =
       (await (await import('./styleWrapper')).styleWrapper(mergedText, {
-        xtreetTone: true
+        xtreetTone: true,
       })) ?? mergedText;
-
-    /* ----------------------- PROVIDER / MODEL TAG --------------------------- */
-    let providerTag = '';
-    const mainResult = ctx.agentResults?.[tasks[0]?.id]?.[0];
-
-    if (mainResult?.provider && mainResult?.model) {
-      providerTag = `[${mainResult.provider} · ${mainResult.model}]\n\n`;
-    }
-
-    /* --------------------------- FAILURE REPORT ----------------------------- */
-    let failureReport = '';
-
-    if (Object.keys(ctx.failures).some((k) => ctx.failures[k].length > 0)) {
-      failureReport += '\n\n\x1b[31m--- MODEL FAILURES DETECTED ---\x1b[0m\n';
-
-      for (const [taskId, fails] of Object.entries(ctx.failures)) {
-        if (fails.length === 0) continue;
-
-        failureReport += `\x1b[33mTask ${taskId}:\x1b[0m\n`;
-        for (const f of fails) {
-          failureReport += `  \x1b[31m- ${f}\x1b[0m\n`;
-        }
-      }
-    }
 
     /* ---------------------------------- COST -------------------------------- */
     const costReport = costController.getReport();
 
     return {
-      ok: true,
+      ok: errors.length === 0,
       category: intent.category,
       modelPlan,
-      response: providerTag + styled + failureReport,
+      response: styled,
       tokensUsed: costReport.totalTokens,
       estimatedCost: costReport.estimatedCost,
-      errors: errors.length ? errors : undefined
+      errors: errors.length ? errors : undefined,
     };
   } catch (e) {
     logger.error('Engine fatal error', { error: String(e) });
@@ -329,10 +283,9 @@ export async function handleMessage(
       response: 'Internal error.',
       tokensUsed: 0,
       estimatedCost: 0,
-      errors: [String(e)]
+      errors: [String(e)],
     };
   }
 }
 
 export default { handleMessage };
-

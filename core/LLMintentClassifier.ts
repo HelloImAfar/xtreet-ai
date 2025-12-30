@@ -1,7 +1,7 @@
 /**
  * core/LLMintentClassifier.ts
  * Xtreet AI — GEN 1
- * PURE LLM INTENT CLASSIFIER (GEMINI)
+ * PURE LLM INTENT + COMPLEXITY CLASSIFIER (GEMINI)
  */
 
 import logger from './logger';
@@ -27,6 +27,8 @@ const CATEGORIES: Category[] = [
   'fast',
   'other'
 ];
+
+type Complexity = 'trivial' | 'normal' | 'deep';
 
 // GEN 1: single deterministic LLM for intent
 const llm = new GeminiProvider();
@@ -59,10 +61,25 @@ export async function analyzeIntentWithLLM(
   text: string
 ): Promise<IntentProfile> {
   const prompt = `
-You are an intent classification engine.
+You are an intent and complexity classification engine.
 
-Infer intent from meaning, context, tone and implication.
+Your task:
+1. Infer the user's intent semantically.
+2. Classify the request by required cognitive depth.
+
 Do NOT rely on keywords.
+Do NOT assume length equals complexity.
+Reason about the minimum depth required to answer WELL.
+
+Complexity definitions:
+- trivial: social, reactive, acknowledgements, confirmations, greetings, thanks, simple replies that require no reasoning or creativity.
+- normal: standard questions or requests that require explanation, structure or light reasoning.
+- deep: requests that require multi-step reasoning, creativity, planning, expertise or high-quality output.
+
+Rules:
+- "fast" category is ONLY valid if complexity is trivial.
+- If complexity is trivial, category MUST be "fast".
+- If complexity is normal or deep, category MUST NOT be "fast".
 
 Return ONLY valid JSON.
 No markdown. No explanations. No extra text.
@@ -74,7 +91,8 @@ JSON schema:
 {
   "intent": "short semantic description",
   "category": "one of the allowed categories",
-  "confidence": number between 0 and 1
+  "confidence": number between 0 and 1,
+  "complexity": "trivial | normal | deep"
 }
 
 User input:
@@ -104,30 +122,17 @@ User input:
     });
 
     if (!rawText) {
-      logger.error({
-        event: 'intent_llm_empty_response',
-        provider: 'gemini'
-      });
-
       return {
         intent: 'empty_llm_response',
         category: 'other',
         confidence: 0,
-        entities: {
-          error: 'EMPTY_RESPONSE_FROM_LLM'
-        }
+        entities: { error: 'EMPTY_RESPONSE_FROM_LLM' }
       };
     }
 
     const parsed = safeJSON(rawText);
 
     if (!parsed) {
-      logger.error({
-        event: 'intent_llm_invalid_json',
-        provider: 'gemini',
-        rawText
-      });
-
       return {
         intent: 'invalid_json',
         category: 'other',
@@ -139,33 +144,37 @@ User input:
       };
     }
 
-    if (!CATEGORIES.includes(parsed.category)) {
-      logger.error({
-        event: 'intent_llm_invalid_category',
-        provider: 'gemini',
-        category: parsed.category,
-        rawText
-      });
+    const complexity: Complexity =
+      parsed.complexity === 'trivial' ||
+      parsed.complexity === 'normal' ||
+      parsed.complexity === 'deep'
+        ? parsed.complexity
+        : 'normal';
 
-      return {
-        intent: parsed.intent ?? 'invalid_category',
-        category: 'other',
-        confidence: 0,
-        entities: {
-          error: 'INVALID_CATEGORY_FROM_LLM',
-          rawResponse: rawText
-        }
-      };
+    let category: Category = CATEGORIES.includes(parsed.category)
+      ? parsed.category
+      : 'other';
+
+    // 🔒 HARD RULE: trivial ⇒ fast
+    if (complexity === 'trivial') {
+      category = 'fast';
+    }
+
+    // 🔒 HARD RULE: non-trivial ⇒ never fast
+    if (complexity !== 'trivial' && category === 'fast') {
+      category = 'other';
     }
 
     return {
       intent: parsed.intent ?? 'unknown',
-      category: parsed.category,
+      category,
       confidence:
         typeof parsed.confidence === 'number'
           ? Math.max(0, Math.min(1, parsed.confidence))
           : 0.5,
-      entities: {}
+      entities: {
+        complexity
+      }
     };
   } catch (err) {
     logger.error({

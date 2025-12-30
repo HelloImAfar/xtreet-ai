@@ -127,8 +127,8 @@ const CATEGORY_STRATEGY: Record<
 
   efficiency: {
     orderedModels: [
-      { provider: 'openai', model: 'fast' },
-      { provider: 'gemini', model: 'fast' }
+      { provider: 'openai', model: 'strong' },
+      { provider: 'gemini', model: 'default' }
     ],
     baseTemp: 0.15,
     rationale: 'Cost / speed optimized.'

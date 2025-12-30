@@ -1,15 +1,27 @@
 import type { ModelProvider } from '@/core/models/provider';
 import type { ExecuteConfig, ExecuteResult } from '@/core/models/provider';
+import logger from './logger';
 
 export type BackoffStrategy = 'exponential' | 'linear' | 'constant';
+export type ExecutionDepth = 'fast' | 'normal' | 'deep';
 
 export type FailoverOptions = {
+  depth?: ExecutionDepth;
+
   backoff?: BackoffStrategy;
   backoffBaseMs?: number;
   maxBackoffMs?: number;
-  partialThresholdChars?: number; // min chars to consider full
-  allowPartial?: boolean; // accept partial if no full available
-  perProviderTimeoutMs?: number; // reserved for provider-level timeout handling
+
+  partialThresholdChars?: number;
+  allowPartial?: boolean;
+
+  perProviderTimeoutMs?: number;
+};
+
+const RETRIES_BY_DEPTH: Record<ExecutionDepth, number> = {
+  fast: 0,
+  normal: 1,
+  deep: 3,
 };
 
 function computeDelay(
@@ -42,9 +54,21 @@ export async function executeWithFailover(
     throw new Error('No providers available for failover execution');
   }
 
+  const depth: ExecutionDepth = opts.depth ?? 'normal';
+  const maxRetries = RETRIES_BY_DEPTH[depth];
+
+  /* 🔹 GEN 1 DEBUG — DEPTH RESOLUTION */
+  logger.info({
+    event: 'failover_depth_resolved',
+    depth,
+    maxRetries,
+    providersCount: providers.length,
+  });
+
   const strategy = opts.backoff ?? 'exponential';
   const base = opts.backoffBaseMs ?? 200;
   const maxMs = opts.maxBackoffMs ?? 5000;
+
   const partialThreshold = opts.partialThresholdChars ?? 20;
   const allowPartial = opts.allowPartial ?? false;
 
@@ -52,53 +76,72 @@ export async function executeWithFailover(
   const usedProviders: string[] = [];
   const partialResults: { provider: string; res: ExecuteResult }[] = [];
 
-  for (let i = 0; i < providers.length; i++) {
-    const provider = providers[i];
+  for (const provider of providers) {
     usedProviders.push(provider.id);
 
-    try {
-      const res = await provider.execute(prompt, config);
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        /* 🔹 GEN 1 DEBUG — ATTEMPT */
+        logger.info({
+          event: 'failover_attempt',
+          provider: provider.id,
+          attempt,
+          maxRetries,
+          depth,
+        });
 
-      const text = res.text ?? '';
-      const isPartial =
-        Boolean(res.meta?.partial) || text.length < partialThreshold;
+        const res = await provider.execute(prompt, config);
 
-      if (isPartial) {
-        partialResults.push({ provider: provider.id, res });
+        const text = res.text ?? '';
+        const isPartial =
+          Boolean(res.meta?.partial) || text.length < partialThreshold;
 
-        // Accept partial only if explicitly allowed and no more providers remain
-        if (allowPartial && i === providers.length - 1) {
-          return {
-            result: res,
-            providerId: provider.id,
-            usedProviders,
-            partial: true,
-            errors,
-          };
+        if (isPartial) {
+          if (!partialResults.find((p) => p.provider === provider.id)) {
+            partialResults.push({ provider: provider.id, res });
+          }
+
+          if (allowPartial && attempt === maxRetries) {
+            return {
+              result: res,
+              providerId: provider.id,
+              usedProviders,
+              partial: true,
+              errors,
+            };
+          }
+
+          continue;
         }
 
-        // Otherwise try next provider
-        continue;
+        return {
+          result: res,
+          providerId: provider.id,
+          usedProviders,
+          partial: false,
+          errors,
+        };
+      } catch (err) {
+        errors.push({
+          provider: provider.id,
+          attempt,
+          error: err,
+        });
+
+        if (attempt < maxRetries) {
+          const delay = computeDelay(
+            attempt + 1,
+            strategy,
+            base,
+            maxMs
+          );
+          await new Promise((r) => setTimeout(r, delay));
+        }
       }
-
-      // Full successful response
-      return {
-        result: res,
-        providerId: provider.id,
-        usedProviders,
-        partial: false,
-        errors,
-      };
-    } catch (err) {
-      errors.push({ provider: provider.id, error: err });
-
-      // Backoff before next provider
-      const delay = computeDelay(i + 1, strategy, base, maxMs);
-      await new Promise((r) => setTimeout(r, delay));
     }
   }
 
-  // No full responses returned — attempt partial merge
+  /* 🔹 Partial merge fallback */
   if (partialResults.length > 0) {
     const mergedText = partialResults
       .map((p) => p.res.text)
@@ -133,7 +176,6 @@ export async function executeWithFailover(
     };
   }
 
-  // All providers failed
   return {
     result: null,
     usedProviders,
