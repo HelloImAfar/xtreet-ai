@@ -6,12 +6,12 @@ import { assemble } from './assembler';
 import { routeTask } from './router';
 import { runAgents } from './agents/agent';
 import LogicalAuditorAgent from './agents/logicalAuditor';
-import StyleRefinementAgent from './agents/styleRefinement';
 import CostOptimizationAgent from './agents/costOptimization';
 import { executeWithFailover } from './retry';
 import { verifyPipeline } from './verifier';
 import { getMemory } from './memory';
 import { CostController } from './costController';
+import { SYSTEM_PROMPT_V1 } from './systemPrompt';
 
 /* ✅ LLM INTENT CLASSIFIER */
 import { analyzeIntentWithLLM } from './LLMintentClassifier';
@@ -104,7 +104,6 @@ export async function handleMessage(
     /* -------------------------------- AGENTS -------------------------------- */
     const agents = [
       LogicalAuditorAgent,
-      StyleRefinementAgent,
       CostOptimizationAgent,
     ];
 
@@ -185,8 +184,8 @@ export async function handleMessage(
         intent.entities?.complexity === 'trivial'
           ? 'fast'
           : intent.entities?.complexity === 'deep'
-            ? 'deep'
-            : 'normal';
+          ? 'deep'
+          : 'normal';
 
       logger.info({
         event: 'depth_resolved',
@@ -207,9 +206,14 @@ export async function handleMessage(
         continue;
       }
 
+      const finalPrompt = `${SYSTEM_PROMPT_V1}
+
+User input:
+${task.text}`;
+
       const out = await executeWithFailover(
         providers,
-        task.text,
+        finalPrompt,
         {
           model: decision.selected.model,
           maxTokens: maxTokensByDepth[depth],
@@ -261,22 +265,18 @@ export async function handleMessage(
       }
     }
 
-    const mergedText = await assemble(assembleInput);
+    const mergedResult = await assemble(assembleInput);
+    const responseText =
+      typeof mergedResult === 'string' ? mergedResult : mergedResult.text;
 
-    /* --------------------------------- STYLE -------------------------------- */
-    const styled =
-      (await (await import('./styleWrapper')).styleWrapper(mergedText, {
-        xtreetTone: true,
-      })) ?? mergedText;
-
-    /* ---------------------------------- COST -------------------------------- */
+    /* --------------------------------- FINAL -------------------------------- */
     const costReport = costController.getReport();
 
     return {
       ok: errors.length === 0,
       category: intent.category,
       modelPlan,
-      response: styled,
+      response: responseText,
       tokensUsed: costReport.totalTokens,
       estimatedCost: costReport.estimatedCost,
       errors: errors.length ? errors : undefined,
