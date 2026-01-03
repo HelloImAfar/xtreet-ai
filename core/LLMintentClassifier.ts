@@ -26,6 +26,7 @@ const CATEGORIES: readonly Category[] = [
   'vision',
   'branding',
   'informative',
+  'xtreet',
   'current',
   'efficiency',
   'fast',
@@ -71,19 +72,29 @@ Your task:
 1. Infer the user's intent semantically.
 2. Classify the request by required cognitive depth.
 
-Do NOT rely on keywords.
+Do NOT rely on keywords alone.
 Do NOT assume length equals complexity.
 Reason about the MINIMUM depth required to answer WELL.
 
 Complexity definitions:
-- trivial: social, reactive, acknowledgements, confirmations, greetings, thanks, simple replies with no reasoning or creativity.
-- normal: standard questions requiring explanation, structure or light reasoning.
-- deep: requests requiring multi-step reasoning, planning, creativity or expert-level output.
+- trivial: greetings, confirmations, thanks, acknowledgements, purely reactive replies.
+- normal: questions requiring explanation, structure or reflection.
+- deep: multi-step reasoning, planning, creativity, or system-level thinking.
+
+CATEGORY DEFINITIONS (IMPORTANT):
+- xtreet:
+  Use this category ONLY when the user is asking about:
+  - what this system is
+  - its identity, purpose, values or principles
+  - what it is for or why it exists
+  - comparisons about what it is or is not
+  These questions are NEVER trivial.
 
 Rules:
-- "fast" category is ONLY valid if complexity is trivial.
+- "fast" is ONLY valid if complexity is trivial.
 - If complexity is trivial, category MUST be "fast".
 - If complexity is normal or deep, category MUST NOT be "fast".
+- The category "xtreet" MUST NEVER be "fast".
 
 Return ONLY valid JSON.
 No markdown. No explanations. No extra text.
@@ -130,9 +141,7 @@ User input:
         intent: 'empty_llm_response',
         category: 'other',
         confidence: 0,
-        entities: {
-          error: 'EMPTY_RESPONSE_FROM_LLM',
-        },
+        entities: { error: 'EMPTY_RESPONSE_FROM_LLM' },
       };
     }
 
@@ -157,7 +166,7 @@ User input:
       parsed.complexity === 'normal' ||
       parsed.complexity === 'deep'
         ? parsed.complexity
-        : 'normal'; // GEN 1 safe fallback
+        : 'normal';
 
     let category: Category =
       typeof parsed.category === 'string' &&
@@ -167,13 +176,18 @@ User input:
 
     /* ---------------------------- HARD RULES ---------------------------- */
 
-    // 🔒 trivial ⇒ fast
+    // trivial ⇒ fast
     if (complexity === 'trivial') {
       category = 'fast';
     }
 
-    // 🔒 non-trivial ⇒ never fast
+    // non-trivial ⇒ never fast
     if (complexity !== 'trivial' && category === 'fast') {
+      category = 'other';
+    }
+
+    // xtreet ⇒ never fast (double lock)
+    if (category === 'xtreet' && complexity === 'trivial') {
       category = 'other';
     }
 
@@ -194,9 +208,7 @@ User input:
       intent: parsed.intent ?? 'unknown',
       category,
       confidence,
-      entities: {
-        complexity,
-      },
+      entities: { complexity },
     };
   } catch (err) {
     logger.error({
@@ -210,13 +222,9 @@ User input:
       intent: 'llm_execution_error',
       category: 'other',
       confidence: 0,
-      entities: {
-        error: 'LLM_EXECUTION_FAILED',
-      },
+      entities: { error: 'LLM_EXECUTION_FAILED' },
     };
   }
 }
 
-export default {
-  analyzeIntentWithLLM,
-};
+export default { analyzeIntentWithLLM };

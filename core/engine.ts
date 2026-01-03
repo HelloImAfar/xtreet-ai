@@ -12,6 +12,7 @@ import { verifyPipeline } from './verifier';
 import { getMemory } from './memory';
 import { CostController } from './costController';
 import { SYSTEM_PROMPT_V1 } from './systemPrompt';
+import { XTREET_SYSTEM_PROMPT } from './xtreetPrompt';
 import troyaSelect from './TROYA';
 import { analyzeIntentWithLLM } from './LLMintentClassifier';
 
@@ -27,6 +28,7 @@ import type {
 /* -------------------------------------------------------------------------- */
 /* CACHE                                                                       */
 /* -------------------------------------------------------------------------- */
+
 const cache = new LRU<string, unknown>({
   max: 100,
   ttl: 1000 * 60 * 60
@@ -35,12 +37,14 @@ const cache = new LRU<string, unknown>({
 /* -------------------------------------------------------------------------- */
 /* PROVIDERS                                                                   */
 /* -------------------------------------------------------------------------- */
+
 import providerRegistry from './providerRegistry';
 type ProviderInstance = ReturnType<typeof providerRegistry.createProvider>;
 
 /* -------------------------------------------------------------------------- */
 /* RESULT TYPE                                                                 */
 /* -------------------------------------------------------------------------- */
+
 export interface EngineResult {
   ok: boolean;
   category: Category;
@@ -54,6 +58,7 @@ export interface EngineResult {
 /* -------------------------------------------------------------------------- */
 /* MAIN                                                                        */
 /* -------------------------------------------------------------------------- */
+
 export async function handleMessage(
   req: MessageRequest,
   clientIp: string
@@ -154,12 +159,17 @@ export async function handleMessage(
           ? 'deep'
           : 'normal';
 
-      const finalPrompt = `${SYSTEM_PROMPT_V1}
+      const systemPrompt =
+        intent.category === 'xtreet'
+          ? XTREET_SYSTEM_PROMPT
+          : SYSTEM_PROMPT_V1;
+
+      const finalPrompt = `${systemPrompt}
 
 User input:
 ${task.text}`;
 
-      /* ---------------- STRATEGIC EXECUTION (ORDERED) ---------------- */
+      /* ---------------- STRATEGIC EXECUTION ---------------- */
 
       const strategicPlan = decision.candidates
         .map(c => ({
@@ -169,7 +179,7 @@ ${task.text}`;
         }))
         .filter(p => p.provider);
 
-      let out = null;
+      let out: any = null;
 
       for (const step of strategicPlan) {
         const res = await executeWithFailover(
@@ -188,7 +198,7 @@ ${task.text}`;
         }
       }
 
-      /* ---------------- TROYA ONLY IF STRATEGIC FAILED ---------------- */
+      /* ---------------- TROYA (ONLY IF STRATEGIC FAILED) ---------------- */
 
       if (!out) {
         logger.warn({

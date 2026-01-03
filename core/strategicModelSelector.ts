@@ -29,6 +29,17 @@ const CATEGORY_STRATEGY: Record<
     rationale: string;
   }
 > = {
+
+xtreet: {
+  orderedModels: [
+    { provider: 'claude', model: 'strong' },
+    { provider: 'openai', model: 'strong' },
+    { provider: 'gemini', model: 'strong' }
+  ],
+  baseTemp: 0.35,
+  rationale: 'Xtreet identity, values and system clarity.'
+},
+
   creative: {
     orderedModels: [
       { provider: 'claude', model: 'strong' },
