@@ -32,6 +32,9 @@ const CATEGORY_STRATEGY: Record<
 
 xtreet: {
   orderedModels: [
+    /* provisional grok inclusion */
+    { provider: 'grok', model: 'strong' },
+    /* provisional grok inclusion */
     { provider: 'claude', model: 'strong' },
     { provider: 'openai', model: 'strong' },
     { provider: 'gemini', model: 'strong' }
