@@ -12,7 +12,7 @@ import { verifyPipeline } from './verifier';
 import { getMemory } from './memory';
 import { CostController } from './costController';
 import { SYSTEM_PROMPT_V1 } from './systemPrompt';
-import troyaSelect from './troya';
+import troyaSelect from './TROYA';
 import { analyzeIntentWithLLM } from './LLMintentClassifier';
 
 import type {
