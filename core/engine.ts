@@ -12,19 +12,8 @@ import { verifyPipeline } from './verifier';
 import { getMemory } from './memory';
 import { CostController } from './costController';
 import { SYSTEM_PROMPT_V1 } from './systemPrompt';
-
-/* ✅ LLM INTENT CLASSIFIER */
+import troyaSelect from './troya';
 import { analyzeIntentWithLLM } from './LLMintentClassifier';
-
-/* ----------------------------- PROVIDERS --------------------------------- */
-import OpenAIProvider from './models/openai/openaiProvider';
-import ClaudeProvider from './models/claude/claudeProvider';
-import DeepSeekProvider from './models/deepseek/deepseekProvider';
-import GrokProvider from './models/grok/grokProvider';
-import GeminiProvider from './models/gemini/geminiProvider';
-import LlamaProvider from './models/llama/llamaProvider';
-import MistralProvider from './models/mistral/mistralProvider';
-import QwenProvider from './models/qwen/qwenProvider';
 
 import type {
   Category,
@@ -32,33 +21,25 @@ import type {
   RExRequest,
   PipelineContext,
   AgentResult,
+  ModelResponse
 } from '../types';
 
 /* -------------------------------------------------------------------------- */
-/* CACHE (GEN 1: preparado, no usado aún) */
+/* CACHE                                                                       */
 /* -------------------------------------------------------------------------- */
 const cache = new LRU<string, unknown>({
   max: 100,
-  ttl: 1000 * 60 * 60,
+  ttl: 1000 * 60 * 60
 });
 
 /* -------------------------------------------------------------------------- */
-/* PROVIDER REGISTRY */
+/* PROVIDERS                                                                   */
 /* -------------------------------------------------------------------------- */
-type ProviderInstance =
-  | OpenAIProvider
-  | ClaudeProvider
-  | DeepSeekProvider
-  | GrokProvider
-  | GeminiProvider
-  | LlamaProvider
-  | MistralProvider
-  | QwenProvider;
-
 import providerRegistry from './providerRegistry';
+type ProviderInstance = ReturnType<typeof providerRegistry.createProvider>;
 
 /* -------------------------------------------------------------------------- */
-/* RESULT */
+/* RESULT TYPE                                                                 */
 /* -------------------------------------------------------------------------- */
 export interface EngineResult {
   ok: boolean;
@@ -71,49 +52,46 @@ export interface EngineResult {
 }
 
 /* -------------------------------------------------------------------------- */
-/* MAIN HANDLER */
+/* MAIN                                                                        */
 /* -------------------------------------------------------------------------- */
 export async function handleMessage(
   req: MessageRequest,
   clientIp: string
 ): Promise<EngineResult> {
   const errors: string[] = [];
+  const modelPlan: string[] = [];
 
   const ctx: PipelineContext = {
-    request: req as RExRequest,
+    request: req as RExRequest
   };
 
   try {
-    /* ----------------------------- MEMORY LOAD ----------------------------- */
+    /* ----------------------------- MEMORY ---------------------------------- */
     ctx.memorySnapshot = await getMemory(req.userId);
 
-    /* ------------------------------- INTENT -------------------------------- */
+    /* ------------------------------ INTENT --------------------------------- */
     const intent = await analyzeIntentWithLLM(req.text);
     ctx.intent = intent;
 
     logger.info({
       event: 'intent_result',
       category: intent.category,
-      confidence: intent.confidence,
+      confidence: intent.confidence
     });
 
-    /* ------------------------------ DECOMPOSE ------------------------------- */
+    /* ---------------------------- DECOMPOSE -------------------------------- */
     const tasks = await decomposeIfNeeded(req.text, intent.category);
     ctx.tasks = tasks;
 
-    /* -------------------------------- AGENTS -------------------------------- */
-    const agents = [
-      LogicalAuditorAgent,
-      CostOptimizationAgent,
-    ];
-
+    /* ------------------------------ AGENTS --------------------------------- */
+    const agents = [LogicalAuditorAgent, CostOptimizationAgent];
     ctx.agentResults = {};
 
     for (const task of tasks) {
       const outputs = await runAgents(agents, {
         taskId: task.id,
         text: task.text,
-        ctx,
+        ctx
       });
 
       ctx.agentResults[task.id] = outputs as AgentResult[];
@@ -125,7 +103,7 @@ export async function handleMessage(
       }
     }
 
-    /* -------------------------------- ROUTING ------------------------------- */
+    /* ------------------------------ ROUTING -------------------------------- */
     ctx.routing = {};
 
     for (const task of tasks) {
@@ -135,141 +113,142 @@ export async function handleMessage(
       logger.info({
         event: 'routing_decision',
         taskId: task.id,
-        intent: intent.category,
         selected: decision.selected,
-        candidates: decision.candidates,
+        candidates: decision.candidates
       });
     }
 
-    /* ------------------------------- PROVIDERS ------------------------------ */
+    /* ----------------------------- EXECUTION ------------------------------- */
     const requestId = `${req.userId}:${Date.now()}`;
     const costController = new CostController({ userId: req.userId, requestId });
 
     const providerCache: Record<string, ProviderInstance> = {};
 
     const getProvider = (name: string): ProviderInstance | undefined => {
-      if (!providerRegistry.isKnownProvider(name)) {
-        logger.warn('Unknown provider requested', { provider: name });
-        return undefined;
-      }
-
+      if (!providerRegistry.isKnownProvider(name)) return;
       if (!providerCache[name]) {
-        const inst = providerRegistry.createProvider(name);
-        if (!inst) {
-          logger.warn('Failed to create provider', { provider: name });
-          return undefined;
-        }
-        providerCache[name] = inst as ProviderInstance;
+        providerCache[name] = providerRegistry.createProvider(name);
       }
-
       return providerCache[name];
     };
 
-    const maxTokensByDepth: Record<'fast' | 'normal' | 'deep', number> = {
+    const maxTokensByDepth = {
       fast: 256,
       normal: 512,
-      deep: 1024,
-    };
+      deep: 1024
+    } as const;
+
+    const settledResults: PromiseSettledResult<ModelResponse>[] = [];
 
     for (const task of tasks) {
       const decision = ctx.routing[task.id];
-
       if (!decision?.selected) {
         errors.push(`routing_missing:${task.id}`);
         continue;
       }
 
-      /* 🔹 DEPTH DECISION (GEN 1 — SINGLE SOURCE OF TRUTH) */
-      const depth: 'fast' | 'normal' | 'deep' =
+      const depth =
         intent.entities?.complexity === 'trivial'
           ? 'fast'
           : intent.entities?.complexity === 'deep'
           ? 'deep'
           : 'normal';
 
-      logger.info({
-        event: 'depth_resolved',
-        depth,
-        complexity: intent.entities?.complexity ?? 'missing',
-      });
-
-      const providers = decision.candidates
-        .map((c) => getProvider(c.provider))
-        .filter((p): p is ProviderInstance => Boolean(p));
-
-      if (providers.length === 0) {
-        errors.push(`no_available_providers:${task.id}`);
-        logger.error('No available providers', {
-          taskId: task.id,
-          candidates: decision.candidates.map((c) => c.provider),
-        });
-        continue;
-      }
-
       const finalPrompt = `${SYSTEM_PROMPT_V1}
 
 User input:
 ${task.text}`;
 
-      const out = await executeWithFailover(
-        providers,
-        finalPrompt,
-        {
-          model: decision.selected.model,
-          maxTokens: maxTokensByDepth[depth],
-        },
-        { depth }
-      );
+      /* ---------------- STRATEGIC EXECUTION (ORDERED) ---------------- */
 
-      if (!out?.result?.text) {
-        errors.push(`provider_error:${task.id}`);
+      const strategicPlan = decision.candidates
+        .map(c => ({
+          provider: getProvider(c.provider),
+          providerId: c.provider,
+          model: c.model
+        }))
+        .filter(p => p.provider);
+
+      let out = null;
+
+      for (const step of strategicPlan) {
+        const res = await executeWithFailover(
+          [step.provider!],
+          finalPrompt,
+          {
+            model: step.model,
+            maxTokens: maxTokensByDepth[depth]
+          },
+          { depth }
+        );
+
+        if (res.result) {
+          out = { ...res, usedModel: step.model };
+          break;
+        }
+      }
+
+      /* ---------------- TROYA ONLY IF STRATEGIC FAILED ---------------- */
+
+      if (!out) {
+        logger.warn({
+          event: 'strategic_exhausted',
+          taskId: task.id
+        });
+
+        const troyaCandidates = troyaSelect(
+          task,
+          intent,
+          ctx,
+          strategicPlan.map(p => p.providerId)
+        );
+
+        for (const c of troyaCandidates) {
+          const p = getProvider(c.provider);
+          if (!p) continue;
+
+          const res = await executeWithFailover(
+            [p],
+            finalPrompt,
+            {
+              model: c.model ?? 'default',
+              maxTokens: maxTokensByDepth[depth]
+            },
+            { depth }
+          );
+
+          if (res.result) {
+            out = { ...res, usedModel: c.model ?? 'default' };
+            break;
+          }
+        }
+      }
+
+      if (!out || !out.result) {
+        errors.push(`execution_failed:${task.id}`);
         continue;
       }
 
+      modelPlan.push(`${out.providerId}:${out.usedModel}`);
+
       costController.addUsage({
         provider: out.providerId ?? 'unknown',
-        model: decision.selected.model ?? 'unknown',
-        tokensOutput: out.result.tokensUsed ?? 0,
+        model: out.usedModel,
+        tokensOutput: out.result.tokensUsed ?? 0
       });
 
-      ctx.agentResults[task.id] = [
-        {
-          taskId: task.id,
-          provider: out.providerId ?? 'unknown',
-          model: decision.selected.model ?? 'unknown',
-          text: out.result.text,
-          status: 'fulfilled',
-          tokensUsed: out.result.tokensUsed,
-        },
-      ];
+      settledResults.push({
+        status: 'fulfilled',
+        value: out.result
+      });
     }
 
-    /* ------------------------------ VERIFICATION ---------------------------- */
+    /* -------------------------- VERIFY + ASSEMBLE -------------------------- */
     ctx.verification = verifyPipeline(ctx);
 
-    /* -------------------------------- ASSEMBLE ------------------------------ */
-    const modelPlan: string[] = [];
-    const assembleInput: Array<{
-      status: 'fulfilled' | 'rejected';
-      value?: { text: string };
-    }> = [];
+    const merged = await assemble(settledResults);
+    const responseText = typeof merged === 'string' ? merged : merged.text;
 
-    for (const task of tasks) {
-      const r = ctx.agentResults?.[task.id]?.[0];
-      if (r?.text) {
-        modelPlan.push(r.model);
-        assembleInput.push({
-          status: 'fulfilled',
-          value: { text: r.text },
-        });
-      }
-    }
-
-    const mergedResult = await assemble(assembleInput);
-    const responseText =
-      typeof mergedResult === 'string' ? mergedResult : mergedResult.text;
-
-    /* --------------------------------- FINAL -------------------------------- */
     const costReport = costController.getReport();
 
     return {
@@ -279,7 +258,7 @@ ${task.text}`;
       response: responseText,
       tokensUsed: costReport.totalTokens,
       estimatedCost: costReport.estimatedCost,
-      errors: errors.length ? errors : undefined,
+      errors: errors.length ? errors : undefined
     };
   } catch (e) {
     logger.error('Engine fatal error', { error: String(e) });
@@ -291,7 +270,7 @@ ${task.text}`;
       response: 'Internal error.',
       tokensUsed: 0,
       estimatedCost: 0,
-      errors: [String(e)],
+      errors: [String(e)]
     };
   }
 }

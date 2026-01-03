@@ -20,7 +20,6 @@ type TaskComplexity = 'low' | 'medium' | 'high';
 /* -------------------------------------------------------------------------- */
 /*                         DEPTH → COMPLEXITY MAP                              */
 /* -------------------------------------------------------------------------- */
-/* GEN 1 ADAPTER — do NOT remove (GEN 2 may unify this) */
 
 function mapDepthToTaskComplexity(depth: Depth): TaskComplexity {
   switch (depth) {
@@ -46,6 +45,10 @@ export type ScoringStrategy = (
   ctx?: PipelineContext
 ) => number;
 
+/**
+ * Strategic candidates MUST always beat non-strategic ones.
+ * This scoring is only used to order fallbacks, never to override strategic intent.
+ */
 export const defaultScoring: ScoringStrategy = (candidate, task) => {
   const words = task.text.split(/\s+/).filter(Boolean).length;
   const estTokens = Math.max(1, Math.round(words / 4));
@@ -56,7 +59,7 @@ export const defaultScoring: ScoringStrategy = (candidate, task) => {
   const practicalScore = cost * estTokens + latency / 100;
 
   if (!candidate.reason?.startsWith('strategic:')) {
-    return 5_000 + practicalScore;
+    return 10_000 + practicalScore;
   }
 
   return practicalScore;
@@ -123,11 +126,7 @@ export function routeTask(
     intent.confidence >= 0.9 &&
     taskComplexity === 'low'
   ) {
-    const strategy = selectStrategicModel(
-      'fast',
-      1,
-      taskComplexity
-    );
+    const strategy = selectStrategicModel('fast', 1, taskComplexity);
 
     const selected: ModelCandidate = {
       provider: strategy.primary.provider,
@@ -150,6 +149,8 @@ export function routeTask(
 
   /* ------------------- STRATEGIC MODEL SELECTION --------------------- */
 
+  let hasStrategic = false;
+
   try {
     if (intent?.category) {
       const strategy = selectStrategicModel(
@@ -165,6 +166,8 @@ export function routeTask(
 
       candidates = candidates.map((c) => {
         if (!strategicProviders.includes(c.provider)) return c;
+
+        hasStrategic = true;
 
         if (c.provider === strategy.primary.provider) {
           return {
@@ -191,24 +194,6 @@ export function routeTask(
     // routing must NEVER break
   }
 
-  /* ------------------------ GLOBAL FAILSAFE -------------------------- */
-
-  const hasStrategic = candidates.some((c) =>
-    c.reason?.startsWith('strategic:')
-  );
-
-  if (!hasStrategic) {
-    candidates = candidates.map((c) => {
-      if (c.provider === 'deepseek') {
-        return { ...c, reason: 'strategic:failsafe-global' };
-      }
-      if (c.provider === 'mistral') {
-        return { ...c, reason: 'strategic:failsafe-secondary' };
-      }
-      return c;
-    });
-  }
-
   /* ---------------------------- SCORING ------------------------------ */
 
   const scored = candidates
@@ -225,10 +210,7 @@ export function routeTask(
   let parallel = false;
 
   try {
-    if (
-      cfg.features?.multicore &&
-      (taskComplexity === 'high')
-    ) {
+    if (cfg.features?.multicore && taskComplexity === 'high') {
       parallel = true;
     }
   } catch {}
